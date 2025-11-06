@@ -1,56 +1,34 @@
-# app.py
+# app.py - UPDATED WITH BETTER OUTPUT HANDLING
 import streamlit as st
 import pandas as pd
 import time
 import json
 import io
-from databricks_api import dbfs_put_single, dbfs_upload_chunked, upload_to_dbfs_simple, run_job, get_job_output, dbfs_read_file, dbfs_file_exists, dbfs_list_files
-from utils import gen_session_id, safe_dbfs_path
+from databricks_api import *
 
 # Page configuration
-st.set_page_config(
-    page_title="Smart Predictor",
-    page_icon="🚀",
-    layout="wide"
-)
+st.set_page_config(page_title="Smart Predictor", page_icon="🚀", layout="wide")
 
-# Safe secret loading with fallbacks
+# Safe secret loading
 def get_secret(key, default=None):
     try:
         return st.secrets[key]
-    except (KeyError, FileNotFoundError):
+    except:
         return default
 
-# Job IDs from Streamlit Cloud secrets with fallbacks
+# Job IDs
 INGEST_JOB_ID = get_secret("DATABRICKS_JOB_INGEST_ID", "675344377204129")
-TRAIN_JOB_ID = get_secret("DATABRICKS_JOB_TRAIN_ID", "362348352440928")
+TRAIN_JOB_ID = get_secret("DATABRICKS_JOB_TRAIN_ID", "362348352440928") 
 SCORE_JOB_ID = get_secret("DATABRICKS_JOB_SCORE_ID", "100926012778266")
 
-# Check if secrets are configured
+# Check secrets
 if not get_secret("DATABRICKS_HOST") or not get_secret("DATABRICKS_TOKEN"):
-    st.error("""
-    ❌ **Databricks credentials not configured!**
-    
-    Please add these secrets in Streamlit Cloud:
-    1. Go to your app settings
-    2. Click on 'Secrets' 
-    3. Add:
-    
-    ```toml
-    DATABRICKS_HOST = "https://dbc-484c2988-d6e6.cloud.databricks.com"
-    DATABRICKS_TOKEN = "dapi1234567890abcdef..."
-    DATABRICKS_JOB_INGEST_ID = "675344377204129"
-    DATABRICKS_JOB_TRAIN_ID = "362348352440928"
-    DATABRICKS_JOB_SCORE_ID = "100926012778266"
-    ```
-    """)
+    st.error("❌ Databricks credentials not configured!")
     st.stop()
 
 # Initialize session state
 if 'session_id' not in st.session_state:
     st.session_state.session_id = None
-if 'current_file' not in st.session_state:
-    st.session_state.current_file = None
 if 'upload_complete' not in st.session_state:
     st.session_state.upload_complete = False
 if 'analysis_results' not in st.session_state:
@@ -61,109 +39,77 @@ if 'scoring_results' not in st.session_state:
     st.session_state.scoring_results = None
 if 'available_columns' not in st.session_state:
     st.session_state.available_columns = []
-if 'predictions_data' not in st.session_state:
-    st.session_state.predictions_data = None
 
-# Helper functions for prediction handling
-def load_predictions_from_directory(directory_path):
-    """Load predictions from Spark output directory by combining all part files"""
-    try:
-        # List all files in the directory
-        files_result = dbfs_list_files(directory_path)
-        if files_result["status"] != "success":
-            return None
-            
-        files = files_result.get("files", [])
-        if not files:
-            return None
-            
-        # Find all CSV part files
-        csv_files = [f for f in files if f["path"].endswith(".csv") and "part-" in f["path"]]
-        if not csv_files:
-            return None
-            
-        # Read and combine all part files
-        all_data = []
-        for file_info in csv_files:
-            file_path = file_info["path"]
-            file_result = dbfs_read_file(file_path)
-            if file_result["status"] == "success":
-                try:
-                    # Read CSV content
-                    content = file_result["content"]
-                    df_part = pd.read_csv(io.StringIO(content))
-                    all_data.append(df_part)
-                except Exception as e:
-                    continue
-        
-        if not all_data:
-            return None
-            
-        # Combine all parts
-        combined_df = pd.concat(all_data, ignore_index=True)
-        return combined_df
-        
-    except Exception as e:
-        return None
-
-def load_predictions_from_single_file(file_path):
-    """Load predictions from a single CSV file"""
-    try:
-        file_result = dbfs_read_file(file_path)
-        if file_result["status"] == "success":
-            content = file_result["content"]
-            df = pd.read_csv(io.StringIO(content))
-            return df
-    except Exception as e:
-        return None
+# NEW: Enhanced prediction loader
+def load_predictions_enhanced(session_id):
+    """Enhanced prediction loader with multiple fallbacks"""
+    base_path = f"/FileStore/results/{session_id}"
+    
+    # Try multiple file locations
+    file_paths = [
+        f"{base_path}/predictions_direct.csv",
+        f"{base_path}/predictions_sample.csv",
+        f"{base_path}/predictions/part-00000-*.csv"
+    ]
+    
+    for file_path in file_paths:
+        result = dbfs_read_file(file_path)
+        if result["status"] == "success":
+            try:
+                df = pd.read_csv(io.StringIO(result["content"]))
+                st.success(f"✅ Loaded predictions from: {file_path}")
+                return df
+            except Exception as e:
+                continue
+    
+    # Try directory listing approach
+    list_result = dbfs_list_files(base_path)
+    if list_result["status"] == "success":
+        files = list_result.get("files", [])
+        for file_info in files:
+            if file_info["path"].endswith(".csv"):
+                result = dbfs_read_file(file_info["path"])
+                if result["status"] == "success":
+                    try:
+                        df = pd.read_csv(io.StringIO(result["content"]))
+                        st.success(f"✅ Loaded from: {file_info['path']}")
+                        return df
+                    except:
+                        continue
+    
     return None
 
-def display_predictions(predictions_df, session_id):
-    """Display predictions with download option"""
-    if predictions_df is None or len(predictions_df) == 0:
-        return False
-        
-    st.subheader("🎯 Prediction Results")
+# NEW: Load EDA results
+def load_eda_results(session_id):
+    """Load EDA results from Databricks"""
+    eda_path = f"/FileStore/eda/{session_id}/eda_results.json"
+    result = dbfs_read_file(eda_path)
     
-    # Display sample predictions
-    st.write("**Sample Predictions:**")
-    st.dataframe(predictions_df.head(10))
-    
-    # Show prediction distribution
-    if 'prediction' in predictions_df.columns:
-        st.write("**Prediction Distribution:**")
-        pred_counts = predictions_df['prediction'].value_counts()
-        st.bar_chart(pred_counts)
-        
-        # Show prediction statistics
-        st.write("**Prediction Statistics:**")
-        st.write(f"Total predictions: {len(predictions_df):,}")
-        st.write(f"Unique predictions: {predictions_df['prediction'].nunique()}")
-        
-        # Show accuracy if we have actual values
-        if 'Diabetes_binary' in predictions_df.columns:
-            accuracy = (predictions_df['prediction'] == predictions_df['Diabetes_binary']).mean()
-            st.write(f"**Accuracy vs actual:** {accuracy:.4f}")
-    
-    # Download button
-    csv = predictions_df.to_csv(index=False)
-    st.download_button(
-        label="📥 Download Full Predictions CSV",
-        data=csv,
-        file_name=f"predictions_{session_id}.csv",
-        mime="text/csv",
-        key=f"download_{session_id}"
-    )
-    
-    return True
+    if result["status"] == "success":
+        try:
+            return json.loads(result["content"])
+        except:
+            return None
+    return None
 
-# App title and description
+# NEW: Load data sample
+def load_data_sample(session_id):
+    """Load data sample for display"""
+    sample_path = f"/FileStore/eda/{session_id}/data_sample.csv"
+    result = dbfs_read_file(sample_path)
+    
+    if result["status"] == "success":
+        try:
+            return pd.read_csv(io.StringIO(result["content"]))
+        except:
+            return None
+    return None
+
+# App UI
 st.title("🚀 Smart Predictor")
-st.markdown("""
-Upload your CSV data, train machine learning models, and get predictions - all without writing code!
-""")
+st.markdown("Upload CSV data, train models, and get predictions - all without code!")
 
-# Sidebar for navigation
+# Sidebar
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Go to", ["Home", "Data Analysis", "Model Training", "Batch Scoring"])
 
@@ -174,66 +120,56 @@ if page == "Home":
     uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"])
     
     if uploaded_file is not None:
-        # Generate session ID for this upload
         if st.session_state.session_id is None:
-            st.session_state.session_id = gen_session_id()
+            st.session_state.session_id = f"session_{int(time.time())}"
             st.session_state.current_file = uploaded_file.name
         
         session_id = st.session_state.session_id
         
         # Display file info
-        file_size = uploaded_file.size / (1024 * 1024)  # Size in MB
+        file_size = uploaded_file.size / (1024 * 1024)
         st.success(f"File: {uploaded_file.name} ({file_size:.2f} MB)")
         st.info(f"Session ID: {session_id}")
         
-        # Upload file to DBFS
+        # Upload to DBFS
         if not st.session_state.upload_complete:
             with st.spinner("Uploading file to Databricks..."):
-                dbfs_path = safe_dbfs_path(session_id, uploaded_file.name)
-                
-                # Use the simple upload method that handles both small and large files
+                dbfs_path = f"/FileStore/tmp/{session_id}/{uploaded_file.name}"
                 result = upload_to_dbfs_simple(uploaded_file, dbfs_path)
                 
                 if result["status"] == "success":
                     st.session_state.upload_complete = True
                     st.session_state.dbfs_path = dbfs_path
-                    st.success(f"✅ {result['message']}")
+                    st.success("✅ File uploaded successfully!")
                     
-                    # Show preview of uploaded data
-                    st.subheader("Data Preview")
-                    try:
-                        uploaded_file.seek(0)  # Reset file pointer
-                        df_preview = pd.read_csv(uploaded_file, nrows=5)
-                        st.dataframe(df_preview)
-                        st.write(f"Shape: {len(df_preview)} rows x {len(df_preview.columns)} columns")
-                        
-                        # Store available columns for later use
-                        st.session_state.available_columns = df_preview.columns.tolist()
-                        
-                        # Show column names and types
-                        st.subheader("Data Types")
-                        col_info = pd.DataFrame({
+                    # Show data preview
+                    st.subheader("📋 Data Preview")
+                    uploaded_file.seek(0)
+                    df_preview = pd.read_csv(uploaded_file, nrows=10)
+                    st.dataframe(df_preview)
+                    st.write(f"Shape: {df_preview.shape[0]} rows × {df_preview.shape[1]} columns")
+                    
+                    # Store column info
+                    st.session_state.available_columns = df_preview.columns.tolist()
+                    
+                    # Show basic info
+                    st.subheader("📊 Basic Information")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.write("**Data Types:**")
+                        dtype_info = pd.DataFrame({
                             'Column': df_preview.columns,
-                            'Type': [str(dtype) for dtype in df_preview.dtypes]
+                            'Type': df_preview.dtypes.astype(str)
                         })
-                        st.dataframe(col_info)
-                        
-                        # Show basic statistics
-                        st.subheader("Basic Statistics")
+                        st.dataframe(dtype_info, height=300)
+                    
+                    with col2:
+                        st.write("**Basic Statistics:**")
                         st.dataframe(df_preview.describe())
                         
-                        # Show column suggestions for diabetes dataset
-                        if 'diabetes_binary' in [col.lower() for col in st.session_state.available_columns]:
-                            st.info("💡 **Diabetes Dataset Detected**: Suggested target column: 'Diabetes_binary'")
-                        elif 'target' in [col.lower() for col in st.session_state.available_columns]:
-                            st.info("💡 **Target Column Detected**: Suggested target column: 'target'")
-                        elif 'label' in [col.lower() for col in st.session_state.available_columns]:
-                            st.info("💡 **Label Column Detected**: Suggested target column: 'label'")
-                            
-                    except Exception as e:
-                        st.error(f"Error previewing data: {str(e)}")
                 else:
-                    st.error(f"❌ {result['message']}")
+                    st.error(f"❌ Upload failed: {result['message']}")
 
 # Data Analysis Page
 elif page == "Data Analysis":
@@ -242,213 +178,129 @@ elif page == "Data Analysis":
     if st.session_state.upload_complete:
         st.success("✅ File uploaded successfully!")
         
-        # Display previous results if available
-        if st.session_state.analysis_results:
+        # Load and display previous EDA results
+        eda_results = load_eda_results(st.session_state.session_id)
+        if eda_results:
             st.subheader("📊 Previous Analysis Results")
             
-            # Display task outputs if available
-            if "task_outputs" in st.session_state.analysis_results:
-                task_outputs = st.session_state.analysis_results["task_outputs"]
-                for task_key, task_data in task_outputs.items():
-                    with st.expander(f"Task: {task_key}"):
-                        if "output" in task_data:
-                            output = task_data["output"]
-                            if "notebook_output" in output and output["notebook_output"]:
-                                st.write("Notebook Output:")
-                                st.code(str(output["notebook_output"]))
-                            if "logs" in output and output["logs"]:
-                                st.write("Logs:")
-                                st.text_area(f"Logs - {task_key}", output["logs"], height=150, key=f"logs_{task_key}")
+            # Display EDA results
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Dataset Overview**")
+                st.metric("Total Rows", f"{eda_results['column_info']['total_rows']:,}")
+                st.metric("Total Columns", eda_results['column_info']['total_columns'])
+                st.metric("Total Missing Values", sum(eda_results['missing_values'].values()))
+            
+            with col2:
+                st.write("**Data Sample**")
+                sample_df = pd.DataFrame(eda_results['data_sample'])
+                st.dataframe(sample_df)
+            
+            # Show data types
+            st.write("**Data Types**")
+            dtype_df = pd.DataFrame({
+                'Column': list(eda_results['data_types'].keys()),
+                'Type': list(eda_results['data_types'].values())
+            })
+            st.dataframe(dtype_df)
+            
+            # Show missing values
+            st.write("**Missing Values**")
+            missing_df = pd.DataFrame({
+                'Column': list(eda_results['missing_values'].keys()),
+                'Missing Count': list(eda_results['missing_values'].values())
+            })
+            st.dataframe(missing_df)
         
-        # Trigger Ingest Job for EDA
-        if st.button("Run Data Analysis"):
-            with st.spinner("Running data analysis..."):
-                # USING JOB PARAMETERS (not notebook_params)
+        # Run Data Analysis
+        if st.button("🚀 Run Data Analysis"):
+            with st.spinner("Running comprehensive data analysis..."):
                 result = run_job(INGEST_JOB_ID, {
                     "dbfs_path": st.session_state.dbfs_path,
                     "session_id": st.session_state.session_id
                 })
                 
                 if result["status"] == "success":
-                    st.success(f"✅ Data analysis completed! Run ID: {result.get('run_id', 'N/A')}")
+                    st.success("✅ Data analysis completed!")
                     
-                    # Get job output and display results
-                    run_id = result.get('run_id')
-                    if run_id:
-                        with st.spinner("Fetching analysis results..."):
-                            # For now, just show basic success message since we can't get multi-task outputs
-                            st.session_state.analysis_results = {
-                                "run_id": run_id,
-                                "status": "success",
-                                "message": "Analysis completed successfully. Check Databricks workspace for detailed results."
-                            }
-                            
-                            st.subheader("📈 Analysis Results")
-                            st.success("✅ Data analysis completed successfully!")
-                            st.info("""
-                            **Next Steps:**
-                            1. Check your Databricks workspace for detailed analysis results
-                            2. The data has been processed and stored in Delta format
-                            3. You can now proceed to Model Training
-                            """)
-                            
-                            # Try to get sample data
-                            sample_path = f"/FileStore/tmp/{st.session_state.session_id}/sample.csv"
-                            if dbfs_file_exists(sample_path):
-                                sample_result = dbfs_read_file(sample_path)
-                                if sample_result["status"] == "success":
-                                    try:
-                                        # Display sample data
-                                        from io import StringIO
-                                        sample_df = pd.read_csv(StringIO(sample_result["content"]))
-                                        st.subheader("📊 Sample Data (First 10K rows)")
-                                        st.dataframe(sample_df.head(10))
-                                        st.write(f"Sample shape: {sample_df.shape}")
-                                        
-                                        # Show basic statistics
-                                        st.subheader("📈 Basic Statistics")
-                                        st.dataframe(sample_df.describe())
-                                        
-                                    except Exception as e:
-                                        st.error(f"Error displaying sample data: {str(e)}")
-                            
-                            st.balloons()
-                    else:
-                        st.info("Analysis completed. Check Databricks workspace for detailed results.")
+                    # Store results
+                    st.session_state.analysis_results = {
+                        "run_id": result.get('run_id'),
+                        "status": "success"
+                    }
+                    
+                    # Wait a bit and reload EDA results
+                    time.sleep(3)
+                    st.rerun()
+                    
                 else:
-                    st.error(f"❌ Data analysis failed: {result['message']}")
+                    st.error(f"❌ Analysis failed: {result['message']}")
     else:
         st.warning("⚠️ Please upload a CSV file first from the Home page.")
 
-# Model Training Page
+# Model Training Page  
 elif page == "Model Training":
     st.header("🤖 Model Training")
     
     if st.session_state.upload_complete:
-        st.info("Train a machine learning model on your uploaded data")
+        st.info("Train a machine learning model on your data")
         
-        # Display previous training results if available
-        if st.session_state.training_results:
-            st.subheader("📊 Previous Training Results")
-            st.json(st.session_state.training_results)
-        
+        # Training configuration
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("Training Configuration")
-            model_type = st.selectbox(
-                "Model Type",
-                ["AutoML (Recommended)", "Random Forest", "Logistic Regression", "Gradient Boosting"]
-            )
-            
-            # Initialize suggested_target
+            # Auto-suggest target column
             suggested_target = ""
+            available_cols = st.session_state.available_columns
             
-            # Show available columns and suggest target
-            if st.session_state.available_columns:
-                st.info(f"📋 Available columns: {', '.join(st.session_state.available_columns)}")
-                
-                # Auto-suggest target column
-                if 'Diabetes_binary' in st.session_state.available_columns:
-                    suggested_target = 'Diabetes_binary'
-                elif 'diabetes_binary' in [col.lower() for col in st.session_state.available_columns]:
-                    # Find the exact case
-                    for col in st.session_state.available_columns:
-                        if col.lower() == 'diabetes_binary':
-                            suggested_target = col
-                            break
-                elif 'target' in [col.lower() for col in st.session_state.available_columns]:
-                    for col in st.session_state.available_columns:
-                        if col.lower() == 'target':
-                            suggested_target = col
-                            break
-                elif 'label' in [col.lower() for col in st.session_state.available_columns]:
-                    for col in st.session_state.available_columns:
-                        if col.lower() == 'label':
-                            suggested_target = col
-                            break
-                else:
-                    # Suggest the last column (common for target)
-                    suggested_target = st.session_state.available_columns[-1]
-                
-                if suggested_target:
-                    st.success(f"💡 Suggested target column: **{suggested_target}**")
+            if 'Diabetes_binary' in available_cols:
+                suggested_target = 'Diabetes_binary'
+            elif 'target' in [col.lower() for col in available_cols]:
+                for col in available_cols:
+                    if col.lower() == 'target':
+                        suggested_target = col
+                        break
+            else:
+                suggested_target = available_cols[-1] if available_cols else ""
             
             target_column = st.text_input(
-                "Target Column (leave empty for auto-detection)", 
-                value=suggested_target if suggested_target else "",
-                help="The column you want to predict. For diabetes dataset, use 'Diabetes_binary'"
+                "Target Column", 
+                value=suggested_target,
+                help="Column to predict"
+            )
+            
+            model_type = st.selectbox(
+                "Model Type",
+                ["Random Forest", "Logistic Regression", "Gradient Boosting", "AutoML"]
             )
         
         with col2:
-            st.subheader("Advanced Options")
-            test_size = st.slider("Test Size Ratio", 0.1, 0.5, 0.2)
+            test_size = st.slider("Test Size", 0.1, 0.5, 0.2)
             random_state = st.number_input("Random State", value=42)
-            
-            # Show target column tips
-            st.info("""
-            **Target Column Tips:**
-            - For classification: Choose a column with limited unique values
-            - For regression: Choose a numeric column
-            - Common target names: 'target', 'label', 'class', 'outcome'
-            """)
-        
-        # Validation
-        if target_column and target_column not in st.session_state.available_columns:
-            st.error(f"❌ Target column '{target_column}' not found in available columns!")
-            st.info(f"Available columns: {', '.join(st.session_state.available_columns)}")
         
         if st.button("🚀 Train Model"):
             if target_column and target_column not in st.session_state.available_columns:
-                st.error("Please select a valid target column from the available columns.")
+                st.error("❌ Target column not found in data!")
             else:
-                with st.spinner("Training model... This may take several minutes."):
-                    # USING JOB PARAMETERS (not notebook_params)
+                with st.spinner("Training model... This may take a few minutes."):
                     result = run_job(TRAIN_JOB_ID, {
                         "session_id": st.session_state.session_id,
-                        "target_column": target_column if target_column else "",
+                        "target_column": target_column,
                         "test_size": str(test_size),
                         "random_state": str(random_state)
                     })
                     
                     if result["status"] == "success":
-                        st.success(f"✅ Model training completed! Run ID: {result.get('run_id', 'N/A')}")
-                        
-                        # Store basic results
+                        st.success("✅ Model training completed!")
                         st.session_state.training_results = {
                             "run_id": result.get('run_id'),
-                            "status": "success",
-                            "message": "Model trained and registered in MLflow",
-                            "model_name": f"smart_predictor_model_{st.session_state.session_id}",
-                            "target_column": target_column
+                            "target_column": target_column,
+                            "status": "success"
                         }
-                        
-                        st.subheader("🎯 Training Results")
-                        st.success("Model trained and registered in MLflow!")
-                        
-                        # Display model info
-                        model_name = f"smart_predictor_model_{st.session_state.session_id}"
-                        st.write(f"**Model Name:** {model_name}")
-                        st.write(f"**Model URI:** models:/{model_name}/latest")
-                        st.write(f"**Target Column:** {target_column if target_column else 'Auto-detected'}")
-                        st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
-                        
-                        st.info("""
-                        **Next Steps:**
-                        1. Model has been trained and registered in MLflow
-                        2. You can now proceed to Batch Scoring to make predictions
-                        3. Check MLflow in your Databricks workspace for detailed metrics
-                        """)
-                        
                         st.balloons()
                     else:
-                        st.error(f"❌ Model training failed: {result['message']}")
-                        st.info("""
-                        **Troubleshooting Tips:**
-                        1. Make sure the target column exists in your data
-                        2. Check that the target column has appropriate values for ML
-                        3. Verify your Databricks job is configured correctly
-                        """)
+                        st.error(f"❌ Training failed: {result['message']}")
     else:
         st.warning("⚠️ Please upload a CSV file first from the Home page.")
 
@@ -458,139 +310,82 @@ elif page == "Batch Scoring":
     
     if st.session_state.upload_complete:
         st.success("✅ File uploaded successfully!")
-        st.info("Generate predictions using your trained model")
         
-        # Add refresh button
+        # Refresh button
         col1, col2 = st.columns([3, 1])
         with col2:
-            if st.button("🔄 Refresh Predictions", key="refresh_predictions"):
+            if st.button("🔄 Refresh Results"):
                 st.rerun()
         
-        # Display previous scoring results if available
-        if st.session_state.scoring_results:
-            st.subheader("📊 Previous Scoring Results")
-            st.json(st.session_state.scoring_results)
+        # Display previous predictions if available
+        predictions_df = load_predictions_enhanced(st.session_state.session_id)
+        if predictions_df is not None:
+            st.subheader("🎯 Prediction Results")
             
-            # Try to load and display previous predictions
-            predictions_base_path = f"/FileStore/results/{st.session_state.session_id}"
-            st.info("🔄 Loading predictions...")
+            # Display predictions
+            st.dataframe(predictions_df.head(10))
+            st.write(f"Total predictions: {len(predictions_df):,}")
             
-            # Try multiple approaches to find predictions
-            predictions_df = None
-            
-            # Approach 1: Try to load from directory (Spark part files)
-            predictions_df = load_predictions_from_directory(predictions_base_path)
-            
-            # Approach 2: Try specific file paths
-            if predictions_df is None:
-                possible_files = [
-                    f"{predictions_base_path}/predictions.csv/part-00000-*.csv",
-                    f"{predictions_base_path}/predictions_single.csv/part-00000-*.csv",
-                    f"{predictions_base_path}/predictions.csv",
-                    f"{predictions_base_path}/predictions_single.csv"
-                ]
-                for file_path in possible_files:
-                    predictions_df = load_predictions_from_single_file(file_path)
-                    if predictions_df is not None:
-                        break
-            
-            # Display predictions if found
-            if predictions_df is not None:
-                st.session_state.predictions_data = predictions_df
-                display_success = display_predictions(predictions_df, st.session_state.session_id)
-                if display_success:
-                    st.balloons()
-            else:
-                st.warning("📁 Predictions not found in automatic search.")
-                st.info("""
-                **Manual Access Instructions:**
-                1. Go to **Databricks Workspace** → **Data** → **DBFS**
-                2. Navigate to: `FileStore/results/{session_id}/`
-                3. Look for CSV files (may be in subdirectories)
-                4. Download and check the files manually
-                """)
+            # Show prediction distribution
+            if 'prediction' in predictions_df.columns:
+                st.write("**Prediction Distribution**")
+                pred_counts = predictions_df['prediction'].value_counts()
+                st.bar_chart(pred_counts)
+                
+                # Download option
+                csv = predictions_df.to_csv(index=False)
+                st.download_button(
+                    label="📥 Download Predictions",
+                    data=csv,
+                    file_name=f"predictions_{st.session_state.session_id}.csv",
+                    mime="text/csv"
+                )
         
-        # Option to upload new data for scoring or use existing
+        # Scoring options
+        st.subheader("🔮 Generate Predictions")
+        
         scoring_file = st.file_uploader(
-            "Upload new data for scoring (optional - uses training data if not provided)", 
+            "Upload new data for scoring (optional)", 
             type=["csv"]
         )
         
         if st.button("🎯 Run Batch Scoring"):
-            # Skip file existence check and proceed directly
-            with st.spinner("Running batch scoring..."):
-                # Use new file if provided, otherwise use original file
-                input_dbfs_path = st.session_state.dbfs_path
-                if scoring_file is not None:
-                    # Upload scoring file
-                    scoring_session_id = st.session_state.session_id + "_scoring"
-                    scoring_dbfs_path = safe_dbfs_path(scoring_session_id, scoring_file.name)
+            if not st.session_state.training_results:
+                st.error("❌ Please train a model first!")
+            else:
+                with st.spinner("Running batch scoring..."):
+                    input_path = st.session_state.dbfs_path
                     
-                    upload_result = upload_to_dbfs_simple(scoring_file, scoring_dbfs_path)
+                    # Use new file if provided
+                    if scoring_file is not None:
+                        scoring_id = f"{st.session_state.session_id}_scoring"
+                        scoring_path = f"/FileStore/tmp/{scoring_id}/{scoring_file.name}"
+                        upload_result = upload_to_dbfs_simple(scoring_file, scoring_path)
+                        
+                        if upload_result["status"] == "success":
+                            input_path = scoring_path
                     
-                    if upload_result["status"] == "success":
-                        input_dbfs_path = scoring_dbfs_path
-                        st.success(f"✅ Scoring file uploaded: {scoring_dbfs_path}")
-                    else:
-                        st.error(f"❌ Scoring file upload failed: {upload_result['message']}")
-                        st.info("Using original training data for scoring...")
-                
-                # Verify training was completed first
-                if not st.session_state.training_results:
-                    st.error("❌ Please train a model first before running batch scoring!")
-                    st.info("Go to the Model Training page and train a model first.")
-                else:
-                    # USING JOB PARAMETERS (not notebook_params)
+                    # Run scoring job
                     result = run_job(SCORE_JOB_ID, {
-                        "input_dbfs_path": input_dbfs_path,
+                        "input_dbfs_path": input_path,
                         "session_id": st.session_state.session_id
                     })
                     
                     if result["status"] == "success":
-                        st.success(f"✅ Batch scoring completed! Run ID: {result.get('run_id', 'N/A')}")
-                        
-                        # Store basic results
+                        st.success("✅ Batch scoring completed!")
                         st.session_state.scoring_results = {
                             "run_id": result.get('run_id'),
-                            "status": "success",
-                            "message": "Predictions generated successfully",
-                            "predictions_path": f"/FileStore/results/{st.session_state.session_id}/"
+                            "status": "success"
                         }
                         
-                        st.subheader("🎯 Scoring Results")
-                        st.success("Predictions generated successfully!")
-                        
-                        # Display predictions info
-                        predictions_base_path = f"/FileStore/results/{st.session_state.session_id}"
-                        st.write(f"**Predictions saved to:** {predictions_base_path}/")
-                        st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
-                        
-                        # Try to load predictions immediately
-                        st.info("🔍 Loading predictions...")
-                        predictions_df = load_predictions_from_directory(predictions_base_path)
-                        
-                        if predictions_df is not None:
-                            st.session_state.predictions_data = predictions_df
-                            display_success = display_predictions(predictions_df, st.session_state.session_id)
-                            if display_success:
-                                st.balloons()
-                        else:
-                            st.warning("⏳ Predictions are being processed...")
-                            st.info("""
-                            **Next Steps:**
-                            1. Wait a few moments and click the **🔄 Refresh Predictions** button above
-                            2. Predictions are being saved by Spark (this takes a moment)
-                            3. Your predictions will appear here automatically when ready
-                            """)
-                        
+                        # Wait and reload predictions
+                        time.sleep(5)
+                        st.rerun()
                     else:
-                        st.error(f"❌ Batch scoring failed: {result['message']}")
+                        st.error(f"❌ Scoring failed: {result['message']}")
     else:
         st.warning("⚠️ Please upload a CSV file first from the Home page.")
 
 # Footer
 st.sidebar.markdown("---")
-st.sidebar.info(
-    "Smart Predictor v1.0 | "
-    "Streamlit Frontend + Databricks Backend"
-)
+st.sidebar.info("Smart Predictor v2.0 | Streamlit + Databricks")
