@@ -5,12 +5,26 @@ import base64
 import time
 
 # -------------------------------
-# Read Databricks secrets from Streamlit Cloud
+# Read Databricks secrets from Streamlit Cloud with error handling
 # -------------------------------
-DATABRICKS_HOST = st.secrets["DATABRICKS_HOST"]
-DATABRICKS_TOKEN = st.secrets["DATABRICKS_TOKEN"]
+def get_secret(key, default=None):
+    """Safely get secret from Streamlit secrets"""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        if default is not None:
+            return default
+        st.error(f"❌ Missing secret: {key}. Please configure secrets in Streamlit Cloud.")
+        st.stop()
 
-HEADERS = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
+# Get secrets with safe fallbacks
+DATABRICKS_HOST = get_secret("DATABRICKS_HOST")
+DATABRICKS_TOKEN = get_secret("DATABRICKS_TOKEN")
+
+if DATABRICKS_HOST and DATABRICKS_TOKEN:
+    HEADERS = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
+else:
+    HEADERS = {}
 
 # -------------------------------
 # 1️⃣ Upload small file to DBFS
@@ -20,6 +34,9 @@ def dbfs_put_single(path, file_obj, overwrite=False):
     Upload small files (<2MB) to DBFS in a single request
     """
     try:
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            return {"status": "error", "message": "Databricks credentials not configured"}
+            
         content = file_obj.read()
         if isinstance(content, str):
             content = content.encode("utf-8")
@@ -50,6 +67,9 @@ def dbfs_upload_chunked(path, file_obj, overwrite=False, chunk_size=2*1024*1024)
     chunk_size default: 2MB
     """
     try:
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            return {"status": "error", "message": "Databricks credentials not configured"}
+            
         base = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs"
         
         # 1) Create file
@@ -94,6 +114,9 @@ def run_job(job_id, notebook_params=None):
     Returns the job's result state (SUCCESS, FAILED, etc.)
     """
     try:
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            return {"status": "error", "message": "Databricks credentials not configured"}
+            
         url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/run-now"
         payload = {"job_id": job_id}
         if notebook_params:
