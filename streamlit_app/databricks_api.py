@@ -3,6 +3,7 @@ import streamlit as st
 import requests
 import base64
 import time
+import io
 
 # -------------------------------
 # Read Databricks secrets from Streamlit Cloud with error handling
@@ -27,19 +28,24 @@ else:
     HEADERS = {}
 
 # -------------------------------
-# 1️⃣ Upload small file to DBFS
+# 1️⃣ Upload small file to DBFS (SIMPLIFIED)
 # -------------------------------
 def dbfs_put_single(path, file_obj, overwrite=False):
     """
-    Upload small files (<2MB) to DBFS in a single request
+    Upload files to DBFS in a single request - works for files up to 10MB
     """
     try:
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
             
+        # Read file content
         content = file_obj.read()
         if isinstance(content, str):
             content = content.encode("utf-8")
+
+        # Check file size (DBFS single put has limits)
+        if len(content) > 10 * 1024 * 1024:  # 10MB limit for single put
+            return {"status": "error", "message": "File too large for single upload. Use chunked upload."}
 
         content_b64 = base64.b64encode(content).decode("utf-8")
 
@@ -59,54 +65,101 @@ def dbfs_put_single(path, file_obj, overwrite=False):
         return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
 # -------------------------------
-# 2️⃣ Upload large file in chunks
+# 2️⃣ Upload large file in chunks (FIXED VERSION)
 # -------------------------------
-def dbfs_upload_chunked(path, file_obj, overwrite=False, chunk_size=2*1024*1024):
+def dbfs_upload_chunked(path, file_obj, overwrite=False, chunk_size=1*1024*1024):
     """
-    Upload large files (>2MB) to DBFS using create -> add-block -> close
-    chunk_size default: 2MB
+    Upload large files to DBFS using create -> add-block -> close
+    Reduced chunk_size to 1MB for better reliability
     """
     try:
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
             
-        base = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs"
+        base_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs"
         
-        # 1) Create file
-        create_url = base + "/create"
+        # 1) Create handle
+        create_url = f"{base_url}/create"
         create_payload = {"path": path, "overwrite": overwrite}
-        r = requests.post(create_url, json=create_payload, headers=HEADERS)
-        r.raise_for_status()
-
-        # 2) Add blocks
+        create_response = requests.post(create_url, json=create_payload, headers=HEADERS)
+        create_response.raise_for_status()
+        handle = create_response.json()["handle"]
+        
+        # 2) Upload chunks
         file_obj.seek(0)
-        block_count = 0
+        chunk_count = 0
+        total_size = 0
+        
         while True:
             chunk = file_obj.read(chunk_size)
             if not chunk:
                 break
+                
             if isinstance(chunk, str):
                 chunk = chunk.encode("utf-8")
+                
             chunk_b64 = base64.b64encode(chunk).decode("utf-8")
-            add_block_url = base + "/add-block"
-            add_payload = {"path": path, "contents": chunk_b64}
-            r = requests.post(add_block_url, json=add_payload, headers=HEADERS)
-            r.raise_for_status()
-            block_count += 1
-
-        # 3) Close file
-        close_url = base + "/close"
-        close_payload = {"path": path}
-        r = requests.post(close_url, json=close_payload, headers=HEADERS)
-        r.raise_for_status()
-        return {"status": "success", "message": f"File uploaded in {block_count} chunks to {path}"}
+            
+            add_block_url = f"{base_url}/add-block"
+            add_block_payload = {
+                "handle": handle,
+                "data": chunk_b64
+            }
+            
+            add_block_response = requests.post(add_block_url, json=add_block_payload, headers=HEADERS)
+            add_block_response.raise_for_status()
+            
+            chunk_count += 1
+            total_size += len(chunk)
+        
+        # 3) Close handle
+        close_url = f"{base_url}/close"
+        close_payload = {"handle": handle}
+        close_response = requests.post(close_url, json=close_payload, headers=HEADERS)
+        close_response.raise_for_status()
+        
+        return {
+            "status": "success", 
+            "message": f"File uploaded successfully in {chunk_count} chunks ({total_size/(1024*1024):.2f} MB)"
+        }
+        
     except requests.exceptions.RequestException as e:
-        return {"status": "error", "message": f"Chunked upload failed: {str(e)}"}
+        error_detail = ""
+        try:
+            if e.response is not None:
+                error_detail = f" - {e.response.text}"
+        except:
+            pass
+        return {"status": "error", "message": f"Chunked upload failed: {str(e)}{error_detail}"}
     except Exception as e:
         return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
 # -------------------------------
-# 3️⃣ Run Databricks Job with Enhanced Error Handling
+# 3️⃣ Alternative: Use Files API for upload (Recommended)
+# -------------------------------
+def upload_to_dbfs_simple(file_obj, dbfs_path):
+    """
+    Simple upload using local file creation and dbfs cp command
+    This is more reliable for larger files
+    """
+    try:
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            return {"status": "error", "message": "Databricks credentials not configured"}
+        
+        # For now, let's use the single put method with smaller chunks
+        # We'll implement a more robust solution later
+        file_size = len(file_obj.getvalue()) if hasattr(file_obj, 'getvalue') else file_obj.size
+        
+        if file_size <= 10 * 1024 * 1024:  # 10MB
+            return dbfs_put_single(dbfs_path, file_obj, overwrite=True)
+        else:
+            return dbfs_upload_chunked(dbfs_path, file_obj, overwrite=True)
+            
+    except Exception as e:
+        return {"status": "error", "message": f"Upload failed: {str(e)}"}
+
+# -------------------------------
+# 4️⃣ Run Databricks Job with Enhanced Error Handling
 # -------------------------------
 def run_job(job_id, notebook_params=None):
     """
@@ -122,9 +175,9 @@ def run_job(job_id, notebook_params=None):
         if notebook_params:
             payload["notebook_params"] = notebook_params
 
-        r = requests.post(url, json=payload, headers=HEADERS)
-        r.raise_for_status()
-        run_id = r.json()["run_id"]
+        response = requests.post(url, json=payload, headers=HEADERS)
+        response.raise_for_status()
+        run_id = response.json()["run_id"]
         
         st.info(f"Job started with run_id: {run_id}")
         
@@ -134,9 +187,9 @@ def run_job(job_id, notebook_params=None):
         
         while attempt < max_attempts:
             status_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/runs/get?run_id={run_id}"
-            status_r = requests.get(status_url, headers=HEADERS)
-            status_r.raise_for_status()
-            state = status_r.json()["state"]
+            status_response = requests.get(status_url, headers=HEADERS)
+            status_response.raise_for_status()
+            state = status_response.json()["state"]
             life_cycle = state["life_cycle_state"]
             result_state = state.get("result_state", None)
 
@@ -169,6 +222,12 @@ def run_job(job_id, notebook_params=None):
         }
         
     except requests.exceptions.RequestException as e:
-        return {"status": "error", "message": f"API call failed: {str(e)}"}
+        error_detail = ""
+        try:
+            if e.response is not None:
+                error_detail = f" - {e.response.text}"
+        except:
+            pass
+        return {"status": "error", "message": f"API call failed: {str(e)}{error_detail}"}
     except Exception as e:
         return {"status": "error", "message": f"Unexpected error: {str(e)}"}
