@@ -265,3 +265,87 @@ def run_job(job_id, job_params=None):
         return {"status": "error", "message": f"API call failed: {str(e)}{error_detail}"}
     except Exception as e:
         return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+# -------------------------------
+# 5️⃣ Get Job Output and Results
+# -------------------------------
+def get_job_output(run_id):
+    """
+    Get the output and logs from a completed job run
+    """
+    try:
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            return {"status": "error", "message": "Databricks credentials not configured"}
+            
+        # Get run output
+        output_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/runs/get-output?run_id={run_id}"
+        output_response = requests.get(output_url, headers=HEADERS)
+        
+        if output_response.status_code == 200:
+            output_data = output_response.json()
+            return {
+                "status": "success", 
+                "output": output_data,
+                "notebook_output": output_data.get("notebook_output", {}),
+                "logs": output_data.get("logs", ""),
+                "metadata": output_data.get("metadata", {})
+            }
+        else:
+            return {"status": "error", "message": f"Failed to get job output: {output_response.text}"}
+            
+    except Exception as e:
+        return {"status": "error", "message": f"Error getting job output: {str(e)}"}
+
+# -------------------------------
+# 6️⃣ Download file from DBFS
+# -------------------------------
+def dbfs_read_file(dbfs_path):
+    """
+    Read a file from DBFS
+    """
+    try:
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            return {"status": "error", "message": "Databricks credentials not configured"}
+            
+        url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs/read"
+        payload = {
+            "path": dbfs_path,
+            "offset": 0,
+            "length": 1000000  # Read up to 1MB
+        }
+        
+        response = requests.post(url, json=payload, headers=HEADERS)
+        
+        if response.status_code == 200:
+            data = response.json()
+            content_b64 = data.get("data", "")
+            if content_b64:
+                content = base64.b64decode(content_b64).decode("utf-8")
+                return {"status": "success", "content": content}
+            else:
+                return {"status": "error", "message": "File is empty or doesn't exist"}
+        else:
+            return {"status": "error", "message": f"Failed to read file: {response.text}"}
+            
+    except Exception as e:
+        return {"status": "error", "message": f"Error reading file: {str(e)}"}
+
+# -------------------------------
+# 7️⃣ Check if file exists in DBFS
+# -------------------------------
+def dbfs_file_exists(dbfs_path):
+    """
+    Check if a file exists in DBFS
+    """
+    try:
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            return {"status": "error", "message": "Databricks credentials not configured"}
+            
+        url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs/get-status"
+        payload = {"path": dbfs_path}
+        
+        response = requests.post(url, json=payload, headers=HEADERS)
+        return response.status_code == 200
+            
+    except:
+        return False
