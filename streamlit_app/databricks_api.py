@@ -350,10 +350,33 @@ def dbfs_file_exists(dbfs_path):
     except:
         return False
 
-# Add these functions to databricks_api.py
+# -------------------------------
+# 8️⃣ List files in DBFS directory
+# -------------------------------
+def dbfs_list_files(directory_path):
+    """
+    List files in a DBFS directory
+    """
+    try:
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            return {"status": "error", "message": "Databricks credentials not configured"}
+            
+        url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs/list"
+        payload = {"path": directory_path}
+        
+        response = requests.post(url, json=payload, headers=HEADERS)
+        
+        if response.status_code == 200:
+            data = response.json()
+            return {"status": "success", "files": data.get("files", [])}
+        else:
+            return {"status": "error", "message": f"Failed to list directory: {response.text}"}
+            
+    except Exception as e:
+        return {"status": "error", "message": f"Error listing files: {str(e)}"}
 
 # -------------------------------
-# 8️⃣ Get Task Runs for Multi-Task Jobs
+# 9️⃣ Get Task Runs for Multi-Task Jobs
 # -------------------------------
 def get_task_runs(run_id):
     """
@@ -406,7 +429,7 @@ def get_task_runs(run_id):
         return {"status": "error", "message": f"Error getting task runs: {str(e)}"}
 
 # -------------------------------
-# 9️⃣ Get Specific Task Output
+# 🔟 Get Specific Task Output
 # -------------------------------
 def get_task_output(task_run_id):
     """
@@ -435,7 +458,7 @@ def get_task_output(task_run_id):
         return {"status": "error", "message": f"Error getting task output: {str(e)}"}
 
 # -------------------------------
-# 🔟 Get Run Details
+# 1️⃣1️⃣ Get Run Details
 # -------------------------------
 def get_run_details(run_id):
     """
@@ -460,4 +483,4 @@ def get_run_details(run_id):
         }
             
     except Exception as e:
-    return {"status": "error", "message": f"Error getting run details: {str(e)}"}
+        return {"status": "error", "message": f"Error getting run details: {str(e)}"}
