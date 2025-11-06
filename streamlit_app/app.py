@@ -1,23 +1,18 @@
 import streamlit as st
-import os
 
-st.set_page_config(page_title="Debug", page_icon="🐛")
+st.set_page_config(
+    page_title="Smart Predictor",
+    page_icon="🤖",
+    layout="wide"
+)
 
-st.title("🔧 Debug - Check Your Files")
+st.title("🤖 Smart Predictor - AI Assistant")
+st.markdown("""
+### Build ML Models in Minutes!
 
-# Check what's in pages directory
-st.header("📁 Files in pages folder:")
-pages_dir = "pages"
+Upload your data, train models, and get predictions - all in one tool.
 
-if os.path.exists(pages_dir):
-    files = os.listdir(pages_dir)
-    st.write("Files found:", files)
-    
-    st.header("🚀 Try Navigation:")
-    for file in files:
-        if file.endswith('.py'):
-            if st.button(f"Go to {file}"):
-                st.switch_page(f"pages/{file}")
-else:
-    st.error("❌ 'pages' directory not found!")
-    st.info("Make sure you have a 'pages' folder with your Python files")
+**Navigate using the sidebar →**
+""")
+
+st.info("💡 **Tip**: Start with **Data Analysis** to upload your CSV file!")
