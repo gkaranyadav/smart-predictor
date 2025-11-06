@@ -58,6 +58,8 @@ if 'training_results' not in st.session_state:
     st.session_state.training_results = None
 if 'scoring_results' not in st.session_state:
     st.session_state.scoring_results = None
+if 'available_columns' not in st.session_state:
+    st.session_state.available_columns = []
 
 # App title and description
 st.title("🚀 Smart Predictor")
@@ -109,6 +111,9 @@ if page == "Home":
                         st.dataframe(df_preview)
                         st.write(f"Shape: {len(df_preview)} rows x {len(df_preview.columns)} columns")
                         
+                        # Store available columns for later use
+                        st.session_state.available_columns = df_preview.columns.tolist()
+                        
                         # Show column names and types
                         st.subheader("Data Types")
                         col_info = pd.DataFrame({
@@ -121,6 +126,14 @@ if page == "Home":
                         st.subheader("Basic Statistics")
                         st.dataframe(df_preview.describe())
                         
+                        # Show column suggestions for diabetes dataset
+                        if 'diabetes_binary' in [col.lower() for col in st.session_state.available_columns]:
+                            st.info("💡 **Diabetes Dataset Detected**: Suggested target column: 'Diabetes_binary'")
+                        elif 'target' in [col.lower() for col in st.session_state.available_columns]:
+                            st.info("💡 **Target Column Detected**: Suggested target column: 'target'")
+                        elif 'label' in [col.lower() for col in st.session_state.available_columns]:
+                            st.info("💡 **Label Column Detected**: Suggested target column: 'label'")
+                            
                     except Exception as e:
                         st.error(f"Error previewing data: {str(e)}")
                 else:
@@ -224,66 +237,120 @@ elif page == "Model Training":
             st.json(st.session_state.training_results)
         
         col1, col2 = st.columns(2)
+        
         with col1:
             st.subheader("Training Configuration")
-            model_type = st.selectbox("Model Type",
-                                      ["AutoML (Recommended)", "Random Forest", "Logistic Regression", "Gradient Boosting"])
-            if st.session_state.upload_complete:
-                try:
-                    uploaded_file.seek(0)
-                    sample_df = pd.read_csv(uploaded_file, nrows=1)
-                    available_columns = sample_df.columns.tolist()
-                    st.info(f"Available columns: {', '.join(available_columns)}")
-                    except:
-                        available_columns = []
-            target_column = st.text_input("Target Column (leave empty for auto-detection)", value="Diabetes_binary",  # Pre-fill with the likely target
-                                          help="For diabetes dataset, use 'Diabetes_binary'" )
+            model_type = st.selectbox(
+                "Model Type",
+                ["AutoML (Recommended)", "Random Forest", "Logistic Regression", "Gradient Boosting"]
+            )
+            
+            # Show available columns and suggest target
+            if st.session_state.available_columns:
+                st.info(f"📋 Available columns: {', '.join(st.session_state.available_columns)}")
+                
+                # Auto-suggest target column
+                suggested_target = ""
+                if 'Diabetes_binary' in st.session_state.available_columns:
+                    suggested_target = 'Diabetes_binary'
+                elif 'diabetes_binary' in [col.lower() for col in st.session_state.available_columns]:
+                    # Find the exact case
+                    for col in st.session_state.available_columns:
+                        if col.lower() == 'diabetes_binary':
+                            suggested_target = col
+                            break
+                elif 'target' in [col.lower() for col in st.session_state.available_columns]:
+                    for col in st.session_state.available_columns:
+                        if col.lower() == 'target':
+                            suggested_target = col
+                            break
+                elif 'label' in [col.lower() for col in st.session_state.available_columns]:
+                    for col in st.session_state.available_columns:
+                        if col.lower() == 'label':
+                            suggested_target = col
+                            break
+                else:
+                    # Suggest the last column (common for target)
+                    suggested_target = st.session_state.available_columns[-1]
+                
+                if suggested_target:
+                    st.success(f"💡 Suggested target column: **{suggested_target}**")
+            
+            target_column = st.text_input(
+                "Target Column (leave empty for auto-detection)", 
+                value=suggested_target if suggested_target else "",
+                help="The column you want to predict. For diabetes dataset, use 'Diabetes_binary'"
+            )
         
         with col2:
             st.subheader("Advanced Options")
             test_size = st.slider("Test Size Ratio", 0.1, 0.5, 0.2)
             random_state = st.number_input("Random State", value=42)
+            
+            # Show target column tips
+            st.info("""
+            **Target Column Tips:**
+            - For classification: Choose a column with limited unique values
+            - For regression: Choose a numeric column
+            - Common target names: 'target', 'label', 'class', 'outcome'
+            """)
+        
+        # Validation
+        if target_column and target_column not in st.session_state.available_columns:
+            st.error(f"❌ Target column '{target_column}' not found in available columns!")
+            st.info(f"Available columns: {', '.join(st.session_state.available_columns)}")
         
         if st.button("🚀 Train Model"):
-            with st.spinner("Training model... This may take several minutes."):
-                # USING JOB PARAMETERS (not notebook_params)
-                result = run_job(TRAIN_JOB_ID, {
-                    "session_id": st.session_state.session_id,
-                    "target_column": target_column if target_column else "",
-                    "test_size": str(test_size),
-                    "random_state": str(random_state)
-                })
-                
-                if result["status"] == "success":
-                    st.success(f"✅ Model training completed! Run ID: {result.get('run_id', 'N/A')}")
+            if target_column and target_column not in st.session_state.available_columns:
+                st.error("Please select a valid target column from the available columns.")
+            else:
+                with st.spinner("Training model... This may take several minutes."):
+                    # USING JOB PARAMETERS (not notebook_params)
+                    result = run_job(TRAIN_JOB_ID, {
+                        "session_id": st.session_state.session_id,
+                        "target_column": target_column if target_column else "",
+                        "test_size": str(test_size),
+                        "random_state": str(random_state)
+                    })
                     
-                    # Store basic results
-                    st.session_state.training_results = {
-                        "run_id": result.get('run_id'),
-                        "status": "success",
-                        "message": "Model trained and registered in MLflow",
-                        "model_name": f"smart_predictor_model_{st.session_state.session_id}"
-                    }
-                    
-                    st.subheader("🎯 Training Results")
-                    st.success("Model trained and registered in MLflow!")
-                    
-                    # Display model info
-                    model_name = f"smart_predictor_model_{st.session_state.session_id}"
-                    st.write(f"**Model Name:** {model_name}")
-                    st.write(f"**Model URI:** models:/{model_name}/latest")
-                    st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
-                    
-                    st.info("""
-                    **Next Steps:**
-                    1. Model has been trained and registered in MLflow
-                    2. You can now proceed to Batch Scoring to make predictions
-                    3. Check MLflow in your Databricks workspace for detailed metrics
-                    """)
-                    
-                    st.balloons()
-                else:
-                    st.error(f"❌ Model training failed: {result['message']}")
+                    if result["status"] == "success":
+                        st.success(f"✅ Model training completed! Run ID: {result.get('run_id', 'N/A')}")
+                        
+                        # Store basic results
+                        st.session_state.training_results = {
+                            "run_id": result.get('run_id'),
+                            "status": "success",
+                            "message": "Model trained and registered in MLflow",
+                            "model_name": f"smart_predictor_model_{st.session_state.session_id}",
+                            "target_column": target_column
+                        }
+                        
+                        st.subheader("🎯 Training Results")
+                        st.success("Model trained and registered in MLflow!")
+                        
+                        # Display model info
+                        model_name = f"smart_predictor_model_{st.session_state.session_id}"
+                        st.write(f"**Model Name:** {model_name}")
+                        st.write(f"**Model URI:** models:/{model_name}/latest")
+                        st.write(f"**Target Column:** {target_column if target_column else 'Auto-detected'}")
+                        st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
+                        
+                        st.info("""
+                        **Next Steps:**
+                        1. Model has been trained and registered in MLflow
+                        2. You can now proceed to Batch Scoring to make predictions
+                        3. Check MLflow in your Databricks workspace for detailed metrics
+                        """)
+                        
+                        st.balloons()
+                    else:
+                        st.error(f"❌ Model training failed: {result['message']}")
+                        st.info("""
+                        **Troubleshooting Tips:**
+                        1. Make sure the target column exists in your data
+                        2. Check that the target column has appropriate values for ML
+                        3. Verify your Databricks job is configured correctly
+                        """)
     else:
         st.warning("⚠️ Please upload a CSV file first from the Home page.")
 
@@ -364,6 +431,11 @@ elif page == "Batch Scoring":
                                     st.write("**Prediction Distribution:**")
                                     pred_counts = predictions_df['prediction'].value_counts()
                                     st.bar_chart(pred_counts)
+                                    
+                                    # Show prediction statistics
+                                    st.write("**Prediction Statistics:**")
+                                    st.write(f"Total predictions: {len(predictions_df)}")
+                                    st.write(f"Unique predictions: {predictions_df['prediction'].nunique()}")
                                     
                                 # Download button
                                 csv = predictions_df.to_csv(index=False)
