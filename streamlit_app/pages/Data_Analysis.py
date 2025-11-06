@@ -149,6 +149,23 @@ if uploaded_file is not None:
     
     except Exception as e:
         st.error(f"Error loading file: {str(e)}")
+        
+    # STORE DATASET IN SESSION STATE FOR MODEL TRAINING PAGE
+    if uploaded_file is not None and 'df' in locals():
+        st.session_state.current_dataset = df
+        st.session_state.uploaded_file_name = uploaded_file.name
+        
+        # Auto-detect potential target
+        potential_targets = []
+        for col in df.columns:
+            if df[col].nunique() <= 10:  # Low cardinality
+                potential_targets.append(col)
+        
+        if potential_targets:
+            st.session_state.target_column = potential_targets[0]
+        
+        st.success("✅ Dataset ready for model training! Go to **Model Training** page.")
+        
 else:
     st.info("👆 Please upload a CSV file to begin analysis")
 
