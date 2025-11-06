@@ -224,14 +224,20 @@ elif page == "Model Training":
             st.json(st.session_state.training_results)
         
         col1, col2 = st.columns(2)
-        
         with col1:
             st.subheader("Training Configuration")
-            model_type = st.selectbox(
-                "Model Type",
-                ["AutoML (Recommended)", "Random Forest", "Logistic Regression", "Gradient Boosting"]
-            )
-            target_column = st.text_input("Target Column (leave empty for auto-detection)", "")
+            model_type = st.selectbox("Model Type",
+                                      ["AutoML (Recommended)", "Random Forest", "Logistic Regression", "Gradient Boosting"])
+            if st.session_state.upload_complete:
+                try:
+                    uploaded_file.seek(0)
+                    sample_df = pd.read_csv(uploaded_file, nrows=1)
+                    available_columns = sample_df.columns.tolist()
+                    st.info(f"Available columns: {', '.join(available_columns)}")
+                    except:
+                        available_columns = []
+            target_column = st.text_input("Target Column (leave empty for auto-detection)", value="Diabetes_binary",  # Pre-fill with the likely target
+                                          help="For diabetes dataset, use 'Diabetes_binary'" )
         
         with col2:
             st.subheader("Advanced Options")
