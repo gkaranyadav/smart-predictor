@@ -1,11 +1,10 @@
 # app.py
-# app.py
 import streamlit as st
 import pandas as pd
 import time
-from databricks_api import dbfs_put_single, dbfs_upload_chunked, upload_to_dbfs_simple, run_job
+import json
+from databricks_api import dbfs_put_single, dbfs_upload_chunked, upload_to_dbfs_simple, run_job, get_job_output, dbfs_read_file, dbfs_file_exists
 from utils import gen_session_id, safe_dbfs_path
-
 
 # Page configuration
 st.set_page_config(
@@ -53,6 +52,12 @@ if 'current_file' not in st.session_state:
     st.session_state.current_file = None
 if 'upload_complete' not in st.session_state:
     st.session_state.upload_complete = False
+if 'analysis_results' not in st.session_state:
+    st.session_state.analysis_results = None
+if 'training_results' not in st.session_state:
+    st.session_state.training_results = None
+if 'scoring_results' not in st.session_state:
+    st.session_state.scoring_results = None
 
 # App title and description
 st.title("🚀 Smart Predictor")
@@ -112,6 +117,10 @@ if page == "Home":
                         })
                         st.dataframe(col_info)
                         
+                        # Show basic statistics
+                        st.subheader("Basic Statistics")
+                        st.dataframe(df_preview.describe())
+                        
                     except Exception as e:
                         st.error(f"Error previewing data: {str(e)}")
                 else:
@@ -124,6 +133,11 @@ elif page == "Data Analysis":
     if st.session_state.upload_complete:
         st.success("✅ File uploaded successfully!")
         
+        # Display previous results if available
+        if st.session_state.analysis_results:
+            st.subheader("📊 Previous Analysis Results")
+            st.json(st.session_state.analysis_results)
+        
         # Trigger Ingest Job for EDA
         if st.button("Run Data Analysis"):
             with st.spinner("Running data analysis..."):
@@ -135,7 +149,43 @@ elif page == "Data Analysis":
                 
                 if result["status"] == "success":
                     st.success(f"✅ Data analysis completed! Run ID: {result.get('run_id', 'N/A')}")
-                    st.info("Analysis results would be displayed here once the job completes.")
+                    
+                    # Get job output and display results
+                    run_id = result.get('run_id')
+                    if run_id:
+                        with st.spinner("Fetching analysis results..."):
+                            output_result = get_job_output(run_id)
+                            
+                            if output_result["status"] == "success":
+                                st.session_state.analysis_results = output_result
+                                
+                                st.subheader("📈 Analysis Results")
+                                
+                                # Display notebook output
+                                notebook_output = output_result.get("notebook_output", {})
+                                if notebook_output:
+                                    st.write("Notebook Output:")
+                                    st.code(str(notebook_output))
+                                
+                                # Display logs
+                                logs = output_result.get("logs", "")
+                                if logs:
+                                    st.write("Job Logs:")
+                                    st.text_area("Logs", logs, height=200)
+                                
+                                # Try to get sample data
+                                sample_path = f"/FileStore/tmp/{st.session_state.session_id}/sample.csv"
+                                if dbfs_file_exists(sample_path):
+                                    sample_result = dbfs_read_file(sample_path)
+                                    if sample_result["status"] == "success":
+                                        st.write("Sample Data Created:")
+                                        st.success(f"Sample data available at: {sample_path}")
+                                
+                                st.balloons()
+                            else:
+                                st.error(f"❌ Failed to get job output: {output_result['message']}")
+                    else:
+                        st.info("Analysis completed. Check Databricks workspace for detailed results.")
                 else:
                     st.error(f"❌ Data analysis failed: {result['message']}")
     else:
@@ -147,6 +197,11 @@ elif page == "Model Training":
     
     if st.session_state.upload_complete:
         st.info("Train a machine learning model on your uploaded data")
+        
+        # Display previous training results if available
+        if st.session_state.training_results:
+            st.subheader("📊 Previous Training Results")
+            st.json(st.session_state.training_results.get("output", {}))
         
         col1, col2 = st.columns(2)
         
@@ -175,7 +230,33 @@ elif page == "Model Training":
                 
                 if result["status"] == "success":
                     st.success(f"✅ Model training completed! Run ID: {result.get('run_id', 'N/A')}")
-                    st.balloons()
+                    
+                    # Get training results
+                    run_id = result.get('run_id')
+                    if run_id:
+                        with st.spinner("Fetching training results..."):
+                            output_result = get_job_output(run_id)
+                            
+                            if output_result["status"] == "success":
+                                st.session_state.training_results = output_result
+                                
+                                st.subheader("🎯 Training Results")
+                                st.success("Model trained and registered in MLflow!")
+                                
+                                # Display model info
+                                model_name = f"smart_predictor_model_{st.session_state.session_id}"
+                                st.write(f"**Model Name:** {model_name}")
+                                st.write(f"**Model URI:** models:/{model_name}/latest")
+                                
+                                # Display notebook output
+                                notebook_output = output_result.get("notebook_output", {})
+                                if notebook_output:
+                                    st.write("Training Output:")
+                                    st.code(str(notebook_output))
+                                
+                                st.balloons()
+                            else:
+                                st.error(f"❌ Failed to get training results: {output_result['message']}")
                 else:
                     st.error(f"❌ Model training failed: {result['message']}")
     else:
@@ -187,6 +268,11 @@ elif page == "Batch Scoring":
     
     if st.session_state.upload_complete:
         st.info("Generate predictions using your trained model")
+        
+        # Display previous scoring results if available
+        if st.session_state.scoring_results:
+            st.subheader("📊 Previous Scoring Results")
+            st.json(st.session_state.scoring_results.get("output", {}))
         
         # Option to upload new data for scoring or use existing
         scoring_file = st.file_uploader(
@@ -220,7 +306,54 @@ elif page == "Batch Scoring":
                 
                 if result["status"] == "success":
                     st.success(f"✅ Batch scoring completed! Run ID: {result.get('run_id', 'N/A')}")
-                    st.info("Predictions would be available for download here once the job completes.")
+                    
+                    # Get scoring results
+                    run_id = result.get('run_id')
+                    if run_id:
+                        with st.spinner("Fetching scoring results..."):
+                            output_result = get_job_output(run_id)
+                            
+                            if output_result["status"] == "success":
+                                st.session_state.scoring_results = output_result
+                                
+                                st.subheader("🎯 Scoring Results")
+                                st.success("Predictions generated successfully!")
+                                
+                                # Display predictions info
+                                predictions_path = f"/FileStore/results/{st.session_state.session_id}/predictions.csv"
+                                st.write(f"**Predictions saved to:** {predictions_path}")
+                                
+                                # Try to download and display predictions
+                                if dbfs_file_exists(predictions_path):
+                                    pred_result = dbfs_read_file(predictions_path)
+                                    if pred_result["status"] == "success":
+                                        try:
+                                            # Read the CSV content
+                                            from io import StringIO
+                                            predictions_df = pd.read_csv(StringIO(pred_result["content"]))
+                                            st.write("**Sample Predictions:**")
+                                            st.dataframe(predictions_df.head(10))
+                                            
+                                            # Show prediction distribution
+                                            if 'prediction' in predictions_df.columns:
+                                                st.write("**Prediction Distribution:**")
+                                                pred_counts = predictions_df['prediction'].value_counts()
+                                                st.bar_chart(pred_counts)
+                                                
+                                            # Download button
+                                            csv = predictions_df.to_csv(index=False)
+                                            st.download_button(
+                                                label="📥 Download Predictions",
+                                                data=csv,
+                                                file_name=f"predictions_{st.session_state.session_id}.csv",
+                                                mime="text/csv"
+                                            )
+                                        except Exception as e:
+                                            st.error(f"Error displaying predictions: {str(e)}")
+                                
+                                st.balloons()
+                            else:
+                                st.error(f"❌ Failed to get scoring results: {output_result['message']}")
                 else:
                     st.error(f"❌ Batch scoring failed: {result['message']}")
     else:
