@@ -1,4 +1,18 @@
 import streamlit as st
+
+def main():
+    # ALL YOUR EXISTING DATA ANALYSIS CODE GOES HERE
+    # Copy everything from your current 2_Data_Analysis.py 
+    # and put it inside this function
+    
+    st.set_page_config(
+        page_title="Data Analysis - Smart Predictor", 
+        page_icon="📊",
+        layout="wide"
+    )
+
+    st.title("📊 Data Analysis")
+    
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -265,3 +279,8 @@ st.success("🎯 **Dataset analysis complete! Go to 'Model Training' page to bui
 # Footer
 st.markdown("---")
 st.caption("💡 **Tip**: Look for patterns, outliers, and choose a good target variable for prediction!")
+# ... rest of your code ...
+
+# Add this at the bottom
+if __name__ == "__main__":
+    main()import streamlit as st
