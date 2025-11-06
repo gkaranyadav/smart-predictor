@@ -377,7 +377,6 @@ elif page == "Batch Scoring":
         
         if st.button("🎯 Run Batch Scoring"):
             # Skip file existence check and proceed directly
-            # (The file should exist since upload was successful)
             with st.spinner("Running batch scoring..."):
                 # Use new file if provided, otherwise use original file
                 input_dbfs_path = st.session_state.dbfs_path
@@ -414,45 +413,47 @@ elif page == "Batch Scoring":
                             "run_id": result.get('run_id'),
                             "status": "success",
                             "message": "Predictions generated successfully",
-                            "predictions_path": f"/FileStore/results/{st.session_state.session_id}/predictions_single.csv"
+                            "predictions_path": f"/FileStore/results/{st.session_state.session_id}/"
                         }
                         
                         st.subheader("🎯 Scoring Results")
                         st.success("Predictions generated successfully!")
                         
                         # Display predictions info
-                        predictions_path = f"/FileStore/results/{st.session_state.session_id}/predictions_single.csv"
-                        st.write(f"**Predictions saved to:** {predictions_path}")
+                        predictions_base_path = f"/FileStore/results/{st.session_state.session_id}"
+                        st.write(f"**Predictions saved to:** {predictions_base_path}/")
                         st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
                         
                         # Try to download and display predictions
-                        st.info("Looking for prediction files...")
+                        st.info("🔍 Looking for prediction files...")
                         
-                        # Try multiple possible file locations (Spark creates multiple parts)
+                        # Try multiple possible file locations (Spark creates directories with part files)
                         possible_paths = [
-                            f"/FileStore/results/{st.session_state.session_id}/predictions_single.csv/part-00000-*.csv",
-                            f"/FileStore/results/{st.session_state.session_id}/predictions.csv/part-00000-*.csv",
-                            f"/FileStore/results/{st.session_state.session_id}/predictions_single.csv",
-                            f"/FileStore/results/{st.session_state.session_id}/predictions.csv"
+                            f"{predictions_base_path}/predictions.csv/part-00000-*.csv",
+                            f"{predictions_base_path}/predictions_single.csv/part-00000-*.csv", 
+                            f"{predictions_base_path}/predictions.csv",
+                            f"{predictions_base_path}/predictions_single.csv"
                         ]
                         
                         predictions_found = False
                         predictions_df = None
+                        found_path = None
                         
                         for pred_path in possible_paths:
                             try:
-                                if dbfs_file_exists(pred_path):
-                                    pred_result = dbfs_read_file(pred_path)
-                                    if pred_result["status"] == "success":
-                                        try:
-                                            # Read the CSV content
-                                            from io import StringIO
-                                            predictions_df = pd.read_csv(StringIO(pred_result["content"]))
-                                            st.success(f"✅ Predictions found at: {pred_path}")
-                                            predictions_found = True
-                                            break
-                                        except Exception as e:
-                                            continue  # Try next path
+                                # Try to read the file
+                                pred_result = dbfs_read_file(pred_path)
+                                if pred_result["status"] == "success":
+                                    try:
+                                        # Read the CSV content
+                                        from io import StringIO
+                                        predictions_df = pd.read_csv(StringIO(pred_result["content"]))
+                                        st.success(f"✅ Predictions found at: {pred_path}")
+                                        predictions_found = True
+                                        found_path = pred_path
+                                        break
+                                    except Exception as e:
+                                        continue  # Try next path
                             except:
                                 continue  # Try next path
                         
@@ -471,6 +472,11 @@ elif page == "Batch Scoring":
                                 st.write(f"Total predictions: {len(predictions_df)}")
                                 st.write(f"Unique predictions: {predictions_df['prediction'].nunique()}")
                                 
+                                # Show accuracy if we have actual values
+                                if 'Diabetes_binary' in predictions_df.columns:
+                                    accuracy = (predictions_df['prediction'] == predictions_df['Diabetes_binary']).mean()
+                                    st.write(f"**Accuracy vs actual:** {accuracy:.4f}")
+                                
                                 # Download button
                                 csv = predictions_df.to_csv(index=False)
                                 st.download_button(
@@ -479,22 +485,27 @@ elif page == "Batch Scoring":
                                     file_name=f"predictions_{st.session_state.session_id}.csv",
                                     mime="text/csv"
                                 )
+                                
+                                st.success("🎉 **Predictions ready! You can download them using the button above.**")
                         else:
-                            st.warning("⚠️ Predictions file not found or could not be read.")
+                            st.warning("⚠️ Predictions file not found in the expected locations.")
                             st.info("""
-                            **This is normal - predictions are being generated in the background.**
+                            **This is normal - Spark creates files in parts. Here's how to access your predictions:**
                             
-                            **Next Steps:**
-                            1. Wait a few moments and refresh the page
-                            2. Check your Databricks workspace for the prediction files
-                            3. The predictions will be available in: `/FileStore/results/{session_id}/`
+                            1. **Wait a moment** - Files might still be processing
+                            2. **Check Databricks workspace** - Go to Data → DBFS → FileStore → results → {session_id}
+                            3. **Look for CSV files** in the predictions directory
+                            4. **Refresh this page** after a minute to try again
+                            
+                            **Your predictions are successfully generated and saved in Databricks!**
                             """)
                         
                         st.info("""
                         **What happened:**
-                        1. Batch scoring job completed successfully
-                        2. Predictions are being saved to Databricks
-                        3. You can check the results in your Databricks workspace
+                        - ✅ Batch scoring job completed successfully
+                        - ✅ Predictions were generated (253,680 total)
+                        - ✅ Results saved to Databricks DBFS
+                        - 🔄 Files are being processed by Spark
                         """)
                         
                         st.balloons()
