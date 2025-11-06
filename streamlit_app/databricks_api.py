@@ -1,89 +1,182 @@
-# databricks_api.py
-import base64
-import json
-import os
 import requests
-from tqdm import tqdm
+import json
+import base64
+import streamlit as st
+import os
 
-DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST")  # e.g. https://adb-xxxx.azuredatabricks.net
-DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN")
+# Get from Streamlit Cloud secrets - NO HARDCODED VALUES
+DATABRICKS_INSTANCE = os.getenv("DATABRICKS_INSTANCE")
+DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN")
+DATABRICKS_JOB_INGEST_ID = os.getenv("DATABRICKS_JOB_INGEST_ID")
+DATABRICKS_JOB_TRAIN_ID = os.getenv("DATABRICKS_JOB_TRAIN_ID")
+DATABRICKS_JOB_SCORE_ID = os.getenv("DATABRICKS_JOB_SCORE_ID")
 
-HEADERS = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
+def validate_databricks_config():
+    """Check if all required environment variables are set"""
+    missing = []
+    if not DATABRICKS_INSTANCE:
+        missing.append("DATABRICKS_INSTANCE")
+    if not DATABRICKS_TOKEN:
+        missing.append("DATABRICKS_TOKEN")
+    if not DATABRICKS_JOB_TRAIN_ID:
+        missing.append("DATABRICKS_JOB_TRAIN_ID")
+    
+    if missing:
+        st.error(f"❌ Missing Databricks configuration: {', '.join(missing)}")
+        st.info("Please set these in Streamlit Cloud secrets under app settings")
+        return False
+    return True
 
-def dbfs_put_single(path: str, fileobj, overwrite=True):
-    """
-    Upload small-to-medium file using the DBFS multipart upload endpoint.
-    Uses /api/2.0/dbfs/put (multipart); Databricks supports streaming uploads.
-    For very large files, use chunked create/add-block/close (example below).
-    """
-    url = DATABRICKS_HOST.rstrip("/") + "/api/2.0/dbfs/put"
-    # The DBFS put endpoint accepts raw bytes in 'contents' base64 encoded, OR multipart upload.
-    # We'll stream in chunks and base64-encode per chunk if needed.
-    fileobj.seek(0)
-    data = fileobj.read()
-    b64 = base64.b64encode(data).decode("utf-8")
-    payload = {"path": path, "contents": b64, "overwrite": overwrite}
-    resp = requests.post(url, headers=HEADERS, json=payload, timeout=300)
-    resp.raise_for_status()
-    return resp.json()
+def dbfs_upload_chunked(dbfs_path, file_obj, overwrite=True):
+    """Upload file to DBFS using chunked upload"""
+    if not validate_databricks_config():
+        return False
+        
+    try:
+        base = DATABRICKS_INSTANCE.rstrip("/") + "/api/2.0/dbfs"
+        
+        # Create handle
+        create_url = f"{base}/create"
+        create_data = {
+            "path": dbfs_path,
+            "overwrite": overwrite
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(create_url, headers=headers, json=create_data)
+        
+        if response.status_code != 200:
+            st.error(f"Failed to create DBFS handle: {response.text}")
+            return False
+            
+        handle = response.json()["handle"]
+        
+        # Upload chunks
+        chunk_size = 1024 * 1024  # 1MB chunks
+        while True:
+            chunk = file_obj.read(chunk_size)
+            if not chunk:
+                break
+                
+            add_block_url = f"{base}/add-block"
+            add_block_data = {
+                "handle": handle,
+                "data": base64.b64encode(chunk).decode()
+            }
+            
+            response = requests.post(add_block_url, headers=headers, json=add_block_data)
+            if response.status_code != 200:
+                st.error(f"Failed to upload chunk: {response.text}")
+                return False
+        
+        # Close handle
+        close_url = f"{base}/close"
+        close_data = {"handle": handle}
+        
+        response = requests.post(close_url, headers=headers, json=close_data)
+        if response.status_code != 200:
+            st.error(f"Failed to close DBFS handle: {response.text}")
+            return False
+            
+        st.success("✅ File uploaded to Databricks successfully!")
+        return True
+        
+    except Exception as e:
+        st.error(f"Error uploading to DBFS: {str(e)}")
+        return False
 
-def dbfs_upload_chunked(path: str, fileobj, overwrite=True, chunk_size=2 * 1024 * 1024):
-    """
-    Chunked upload for large files using create -> add_block -> close pattern.
-    Endpoints: /api/2.0/dbfs/create, /api/2.0/dbfs/add-block, /api/2.0/dbfs/close
-    """
-    base = DATABRICKS_HOST.rstrip("/") + "/api/2.0/dbfs"
-    # 1) create
-    create_url = base + "/create"
-    create_payload = {"path": path, "overwrite": overwrite}
-    r = requests.post(create_url, headers=HEADERS, json=create_payload)
-    r.raise_for_status()
-    handle = r.json().get("handle")
+def trigger_databricks_job(job_id, parameters=None):
+    """Trigger a Databricks job"""
+    if not validate_databricks_config():
+        return None
+        
+    try:
+        url = f"{DATABRICKS_INSTANCE}/api/2.1/jobs/run-now"
+        
+        payload = {
+            "job_id": job_id
+        }
+        
+        if parameters:
+            payload["notebook_params"] = parameters
+            
+        headers = {
+            "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(url, headers=headers, json=payload)
+        
+        if response.status_code == 200:
+            run_id = response.json()["run_id"]
+            st.success(f"✅ Job triggered successfully! Run ID: {run_id}")
+            return run_id
+        else:
+            st.error(f"Failed to trigger job: {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error triggering job: {str(e)}")
+        return None
 
-    # 2) chunk & add-block
-    add_url = base + "/add-block"
-    fileobj.seek(0)
-    while True:
-        chunk = fileobj.read(chunk_size)
-        if not chunk:
-            break
-        chunk_b64 = base64.b64encode(chunk).decode("utf-8")
-        r = requests.post(add_url, headers=HEADERS, json={"handle": handle, "data": chunk_b64})
-        r.raise_for_status()
-    # 3) close
-    close_url = base + "/close"
-    r = requests.post(close_url, headers=HEADERS, json={"handle": handle})
-    r.raise_for_status()
-    return {"path": path}
+def get_job_status(run_id):
+    """Get status of a Databricks job run"""
+    if not validate_databricks_config():
+        return None
+        
+    try:
+        url = f"{DATABRICKS_INSTANCE}/api/2.1/jobs/runs/get"
+        
+        headers = {
+            "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        params = {"run_id": run_id}
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Failed to get job status: {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error getting job status: {str(e)}")
+        return None
 
-def run_job(job_id: int, notebook_params: dict = None):
-    """
-    Trigger a Databricks job by job_id (pre-created job in Databricks).
-    Returns run_id.
-    """
-    url = DATABRICKS_HOST.rstrip("/") + "/api/2.2/jobs/run-now"
-    payload = {"job_id": job_id}
-    if notebook_params:
-        payload["notebook_params"] = notebook_params
-    r = requests.post(url, headers=HEADERS, json=payload)
-    r.raise_for_status()
-    return r.json()["run_id"]
-
-def get_run(run_id: int):
-    url = DATABRICKS_HOST.rstrip("/") + f"/api/2.2/jobs/runs/get?run_id={run_id}"
-    r = requests.get(url, headers=HEADERS)
-    r.raise_for_status()
-    return r.json()
-
-def download_dbfs_file(path: str, local_path: str):
-    url = DATABRICKS_HOST.rstrip("/") + "/api/2.0/dbfs/read"
-    payload = {"path": path}
-    r = requests.get(url, headers=HEADERS, params=payload, stream=True)
-    r.raise_for_status()
-    data = r.json()
-    # read returns base64 'data' string
-    b64 = data.get("data")
-    decoded = base64.b64decode(b64)
-    with open(local_path, "wb") as f:
-        f.write(decoded)
-    return local_path
+def get_job_result(run_id):
+    """Get the output/result of a completed job"""
+    status_info = get_job_status(run_id)
+    
+    if not status_info:
+        return None
+        
+    state = status_info["state"]
+    
+    if state["life_cycle_state"] == "TERMINATED":
+        if state["result_state"] == "SUCCESS":
+            # Get job output
+            url = f"{DATABRICKS_INSTANCE}/api/2.1/jobs/runs/get-output"
+            headers = {
+                "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+                "Content-Type": "application/json"
+            }
+            params = {"run_id": run_id}
+            
+            response = requests.get(url, headers=headers, params=params)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                st.error(f"Failed to get job output: {response.text}")
+                return None
+        else:
+            st.error(f"Job failed: {state.get('state_message', 'Unknown error')}")
+            return None
+    else:
+        # Job still running
+        return {"status": "running", "state": state}
