@@ -2,6 +2,7 @@
 import uuid
 import os
 from datetime import datetime
+import re
 
 def gen_session_id():
     """Generate unique session ID for each user session"""
@@ -10,5 +11,5 @@ def gen_session_id():
 def safe_dbfs_path(session_id, filename):
     """Create safe DBFS path for file storage"""
     # Remove spaces and special characters from filename
-    name = filename.replace(" ", "_").replace("(", "").replace(")", "")
+    name = re.sub(r'[^\w\.-]', '_', filename)
     return f"/FileStore/tmp/{session_id}/{name}"
