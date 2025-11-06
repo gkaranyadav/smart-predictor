@@ -375,56 +375,90 @@ elif page == "Batch Scoring":
         )
         
         if st.button("🎯 Run Batch Scoring"):
-            with st.spinner("Running batch scoring..."):
-                # Use new file if provided, otherwise use original file
-                input_dbfs_path = st.session_state.dbfs_path
-                if scoring_file is not None:
-                    # Upload scoring file
-                    scoring_dbfs_path = safe_dbfs_path(
-                        st.session_state.session_id + "_scoring", 
-                        scoring_file.name
-                    )
+            # Verify the file exists in DBFS first
+            file_check = dbfs_file_exists(st.session_state.dbfs_path)
+            if not file_check:
+                st.error(f"❌ File not found in DBFS: {st.session_state.dbfs_path}")
+                st.info("Please re-upload the file from the Home page.")
+            else:
+                with st.spinner("Running batch scoring..."):
+                    # Use new file if provided, otherwise use original file
+                    input_dbfs_path = st.session_state.dbfs_path
+                    if scoring_file is not None:
+                        # Upload scoring file
+                        scoring_dbfs_path = safe_dbfs_path(
+                            st.session_state.session_id + "_scoring", 
+                            scoring_file.name
+                        )
+                        
+                        upload_result = upload_to_dbfs_simple(scoring_file, scoring_dbfs_path)
+                        
+                        if upload_result["status"] == "success":
+                            input_dbfs_path = scoring_dbfs_path
+                            st.success(f"✅ Scoring file uploaded: {scoring_dbfs_path}")
+                        else:
+                            st.error(f"❌ Scoring file upload failed: {upload_result['message']}")
+                            st.info("Using original training data for scoring...")
                     
-                    upload_result = upload_to_dbfs_simple(scoring_file, scoring_dbfs_path)
-                    
-                    if upload_result["status"] == "success":
-                        input_dbfs_path = scoring_dbfs_path
+                    # Verify training was completed first
+                    if not st.session_state.training_results:
+                        st.error("❌ Please train a model first before running batch scoring!")
+                        st.info("Go to the Model Training page and train a model first.")
                     else:
-                        st.error(f"❌ Scoring file upload failed: {upload_result['message']}")
-                
-                # USING JOB PARAMETERS (not notebook_params)
-                result = run_job(SCORE_JOB_ID, {
-                    "input_dbfs_path": input_dbfs_path,
-                    "session_id": st.session_state.session_id
-                })
-                
-                if result["status"] == "success":
-                    st.success(f"✅ Batch scoring completed! Run ID: {result.get('run_id', 'N/A')}")
-                    
-                    # Store basic results
-                    st.session_state.scoring_results = {
-                        "run_id": result.get('run_id'),
-                        "status": "success",
-                        "message": "Predictions generated successfully",
-                        "predictions_path": f"/FileStore/results/{st.session_state.session_id}/predictions.csv"
-                    }
-                    
-                    st.subheader("🎯 Scoring Results")
-                    st.success("Predictions generated successfully!")
-                    
-                    # Display predictions info
-                    predictions_path = f"/FileStore/results/{st.session_state.session_id}/predictions.csv"
-                    st.write(f"**Predictions saved to:** {predictions_path}")
-                    st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
-                    
-                    # Try to download and display predictions
-                    if dbfs_file_exists(predictions_path):
-                        pred_result = dbfs_read_file(predictions_path)
-                        if pred_result["status"] == "success":
-                            try:
-                                # Read the CSV content
-                                from io import StringIO
-                                predictions_df = pd.read_csv(StringIO(pred_result["content"]))
+                        # USING JOB PARAMETERS (not notebook_params)
+                        result = run_job(SCORE_JOB_ID, {
+                            "input_dbfs_path": input_dbfs_path,
+                            "session_id": st.session_state.session_id
+                        })
+                        
+                        if result["status"] == "success":
+                            st.success(f"✅ Batch scoring completed! Run ID: {result.get('run_id', 'N/A')}")
+                            
+                            # Store basic results
+                            st.session_state.scoring_results = {
+                                "run_id": result.get('run_id'),
+                                "status": "success",
+                                "message": "Predictions generated successfully",
+                                "predictions_path": f"/FileStore/results/{st.session_state.session_id}/predictions_single.csv/part-00000-*.csv"
+                            }
+                            
+                            st.subheader("🎯 Scoring Results")
+                            st.success("Predictions generated successfully!")
+                            
+                            # Display predictions info
+                            predictions_path = f"/FileStore/results/{st.session_state.session_id}/predictions_single.csv"
+                            st.write(f"**Predictions saved to:** {predictions_path}")
+                            st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
+                            
+                            # Try to download and display predictions
+                            st.info("Looking for prediction files...")
+                            
+                            # Try multiple possible file locations
+                            possible_paths = [
+                                f"/FileStore/results/{st.session_state.session_id}/predictions_single.csv/part-00000-*.csv",
+                                f"/FileStore/results/{st.session_state.session_id}/predictions.csv/part-00000-*.csv",
+                                f"/FileStore/results/{st.session_state.session_id}/predictions_single.csv",
+                                f"/FileStore/results/{st.session_state.session_id}/predictions.csv"
+                            ]
+                            
+                            predictions_found = False
+                            predictions_df = None
+                            
+                            for pred_path in possible_paths:
+                                if dbfs_file_exists(pred_path):
+                                    pred_result = dbfs_read_file(pred_path)
+                                    if pred_result["status"] == "success":
+                                        try:
+                                            # Read the CSV content
+                                            from io import StringIO
+                                            predictions_df = pd.read_csv(StringIO(pred_result["content"]))
+                                            st.success(f"✅ Predictions found at: {pred_path}")
+                                            predictions_found = True
+                                            break
+                                        except Exception as e:
+                                            st.warning(f"Could not read predictions from {pred_path}: {str(e)}")
+                            
+                            if predictions_found and predictions_df is not None:
                                 st.write("**Sample Predictions:**")
                                 st.dataframe(predictions_df.head(10))
                                 
@@ -439,29 +473,40 @@ elif page == "Batch Scoring":
                                     st.write(f"Total predictions: {len(predictions_df)}")
                                     st.write(f"Unique predictions: {predictions_df['prediction'].nunique()}")
                                     
-                                # Download button
-                                csv = predictions_df.to_csv(index=False)
-                                st.download_button(
-                                    label="📥 Download Predictions",
-                                    data=csv,
-                                    file_name=f"predictions_{st.session_state.session_id}.csv",
-                                    mime="text/csv"
-                                )
-                            except Exception as e:
-                                st.error(f"Error displaying predictions: {str(e)}")
-                    else:
-                        st.info("Predictions file not found yet. It may take a moment to generate.")
-                    
-                    st.info("""
-                    **Next Steps:**
-                    1. Predictions have been generated and saved
-                    2. You can download the predictions using the button above
-                    3. Check your Databricks workspace for detailed scoring logs
-                    """)
-                    
-                    st.balloons()
-                else:
-                    st.error(f"❌ Batch scoring failed: {result['message']}")
+                                    # Download button
+                                    csv = predictions_df.to_csv(index=False)
+                                    st.download_button(
+                                        label="📥 Download Predictions",
+                                        data=csv,
+                                        file_name=f"predictions_{st.session_state.session_id}.csv",
+                                        mime="text/csv"
+                                    )
+                            else:
+                                st.warning("⚠️ Predictions file not found or could not be read.")
+                                st.info("""
+                                **Possible reasons:**
+                                1. Predictions are still being generated (wait a moment and refresh)
+                                2. File path changed in the scoring job
+                                3. Check Databricks workspace for the actual file location
+                                """)
+                            
+                            st.info("""
+                            **Next Steps:**
+                            1. Predictions have been generated and saved
+                            2. You can download the predictions using the button above
+                            3. Check your Databricks workspace for detailed scoring logs
+                            """)
+                            
+                            st.balloons()
+                        else:
+                            st.error(f"❌ Batch scoring failed: {result['message']}")
+                            st.info("""
+                            **Troubleshooting Tips:**
+                            1. Make sure the training completed successfully
+                            2. Check that the input file exists in DBFS
+                            3. Verify the scoring job is configured correctly
+                            4. Check Databricks job logs for detailed error messages
+                            """)
     else:
         st.warning("⚠️ Please upload a CSV file first from the Home page.")
 
