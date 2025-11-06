@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 
-# Page configuration
+# THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
     page_title="Smart Predictor",
     page_icon="🤖",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"  # Force sidebar to open
 )
 
 # Main app
@@ -14,44 +14,18 @@ st.title("🤖 Smart Predictor - AI Assistant")
 st.markdown("""
 ### Build Machine Learning Models in Minutes!
 
-**Navigation Issue Detected:** Sidebar is hidden. Use the buttons below to navigate.
+**If you don't see the sidebar on the left, please:**
+1. **Refresh this page** (press F5 or Ctrl+R)
+2. **Look for ☰ hamburger menu** in top-right corner
+3. **Click it** to open the sidebar
+4. **Click 'Data Analysis'** to upload and analyze your data
+
+*The sidebar should automatically show: Home, Data Analysis, Model Training*
 """)
 
-# DIRECT NAVIGATION BUTTONS
+# File upload as backup
 st.markdown("---")
-st.header("🚀 Quick Navigation")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("📊 Data Analysis")
-    st.write("Upload and analyze your dataset with automatic insights")
-    if st.button("📥 GO TO DATA ANALYSIS", use_container_width=True, type="primary"):
-        # Switch to data analysis page
-        st.session_state.current_page = "data_analysis"
-        st.rerun()
-
-with col2:
-    st.subheader("🤖 Model Training")
-    st.write("Train ML models with hyperparameter tuning")
-    if st.button("⚡ GO TO MODEL TRAINING", use_container_width=True, type="primary"):
-        # Switch to model training page  
-        st.session_state.current_page = "model_training"
-        st.rerun()
-
-# Handle page switching
-if st.session_state.get('current_page') == "data_analysis":
-    # Import and run data analysis page
-    from pages import Data_Analysis
-    Data_Analysis.main()
-elif st.session_state.get('current_page') == "model_training":
-    # Import and run model training page
-    from pages import Model_Training  
-    Model_Training.main()
-
-# File upload section (keep this for direct access)
-st.markdown("---")
-st.header("📁 Or Upload File Directly Here")
+st.header("📁 Quick Start - Upload File Here")
 
 uploaded_file = st.file_uploader("Upload your CSV file:", type=["csv"])
 
@@ -76,21 +50,48 @@ if uploaded_file is not None:
         with col3:
             st.metric("Missing Values", df.isnull().sum().sum())
             
-        st.success("🎯 **Ready! Click 'GO TO DATA ANALYSIS' button above to explore your data!**")
+        st.success("🎯 **Now go to 'Data Analysis' page in the sidebar to explore your data!**")
         
     except Exception as e:
         st.error(f"❌ Error reading file: {str(e)}")
 
 # Show current status
 st.markdown("---")
-st.header("🔧 Current Status")
+st.header("🔧 App Status")
 
 if 'current_dataset' in st.session_state:
     st.success("✅ Dataset loaded in memory and ready for analysis!")
+    df = st.session_state.current_dataset
     st.write(f"**File:** {st.session_state.uploaded_file_name}")
-    st.write(f"**Shape:** {st.session_state.current_dataset.shape[0]} rows × {st.session_state.current_dataset.shape[1]} columns")
+    st.write(f"**Shape:** {df.shape[0]} rows × {df.shape[1]} columns")
+    st.write(f"**Columns:** {', '.join(df.columns.tolist()[:10])}{'...' if len(df.columns) > 10 else ''}")
 else:
     st.info("📝 No dataset loaded yet. Upload a CSV file above.")
 
+# Troubleshooting guide
+with st.expander("🔧 Troubleshooting - If pages don't appear"):
+    st.markdown("""
+    **If sidebar doesn't show pages:**
+    1. **Check your folder structure:**
+       ```
+       streamlit_app/
+       ├── app.py
+       ├── pages/
+       │   ├── 1_🏠_Home.py
+       │   ├── 2_📊_Data_Analysis.py
+       │   └── 3_🤖_Model_Training.py
+       └── requirements.txt
+       ```
+    
+    2. **Make sure files are named correctly:**
+       - `1_🏠_Home.py` (or `1_Home.py`)
+       - `2_📊_Data_Analysis.py` (or `2_Data_Analysis.py`) 
+       - `3_🤖_Model_Training.py` (or `3_Model_Training.py`)
+    
+    3. **Refresh the browser page completely** (Ctrl+F5)
+    
+    4. **Try a different browser** (Chrome, Firefox, Edge)
+    """)
+
 st.markdown("---")
-st.caption("Smart Predictor v1.0 | Streamlit + Databricks Integration")
+st.caption("Smart Predictor v1.0 | If pages don't appear, refresh and check sidebar")
