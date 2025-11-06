@@ -500,7 +500,6 @@ elif page == "Batch Scoring":
                 display_success = display_predictions(predictions_df, st.session_state.session_id)
                 if display_success:
                     st.balloons()
-                    return
             else:
                 st.warning("📁 Predictions not found in automatic search.")
                 st.info("""
