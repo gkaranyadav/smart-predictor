@@ -1,97 +1,129 @@
+# app.py
 import streamlit as st
 import pandas as pd
+import time
+import io
+from databricks_api import dbfs_put_single, dbfs_upload_chunked, run_job, get_run, download_dbfs_file
+from utils import gen_session_id, safe_dbfs_path
 
-# THIS MUST BE THE FIRST STREAMLIT COMMAND
-st.set_page_config(
-    page_title="Smart Predictor",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"  # Force sidebar to open
-)
+st.set_page_config(page_title="Smart Predictor", layout="wide")
+st.title("Smart Predictor — Streamlit → Databricks (Batch scoring)")
 
-# Main app
-st.title("🤖 Smart Predictor - AI Assistant")
-st.markdown("""
-### Build Machine Learning Models in Minutes!
+# --- Config ---
+DATABRICKS_UPLOAD_CHUNK_THRESHOLD = 5 * 1024 * 1024  # 5 MB: use chunked above this
 
-**If you don't see the sidebar on the left, please:**
-1. **Refresh this page** (press F5 or Ctrl+R)
-2. **Look for ☰ hamburger menu** in top-right corner
-3. **Click it** to open the sidebar
-4. **Click 'Data Analysis'** to upload and analyze your data
+# --- Secrets (set these in Streamlit Secrets) ---
+DATABRICKS_JOB_INGEST_ID = int(st.secrets["DATABRICKS_JOB_INGEST_ID"])
+DATABRICKS_JOB_TRAIN_ID = int(st.secrets["DATABRICKS_JOB_TRAIN_ID"])
+DATABRICKS_JOB_SCORE_ID = int(st.secrets["DATABRICKS_JOB_SCORE_ID"])
 
-*The sidebar should automatically show: Home, Data Analysis, Model Training*
-""")
+# --- Upload section ---
+uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
+if uploaded_file:
+    session_id = gen_session_id()
+    st.session_state["session_id"] = session_id
+    filename = uploaded_file.name
+    dbfs_path = safe_dbfs_path(session_id, filename)
+    st.write("Uploading to Databricks DBFS...", dbfs_path)
 
-# File upload as backup
-st.markdown("---")
-st.header("📁 Quick Start - Upload File Here")
+    # Upload using chunk or single based on size
+    uploaded_file.seek(0, io.SEEK_END)
+    size = uploaded_file.tell()
+    uploaded_file.seek(0)
+    if size > DATABRICKS_UPLOAD_CHUNK_THRESHOLD:
+        with st.spinner("Large file detected — uploading in chunks..."):
+            dbfs_upload_chunked(dbfs_path, uploaded_file, overwrite=True)
+    else:
+        with st.spinner("Uploading..."):
+            dbfs_put_single(dbfs_path, uploaded_file, overwrite=True)
+    st.success("Upload complete. Triggering ingestion job to convert to Delta...")
 
-uploaded_file = st.file_uploader("Upload your CSV file:", type=["csv"])
+    # Trigger the ingestion job (Databricks job should accept 'dbfs_path' and 'dataset_id')
+    notebook_params = {"dbfs_path": dbfs_path, "session_id": session_id}
+    run_id = run_job(DATABRICKS_JOB_INGEST_ID, notebook_params)
+    st.info(f"Ingest job started (run_id: {run_id}). Polling status...")
 
-if uploaded_file is not None:
-    try:
-        df = pd.read_csv(uploaded_file)
-        st.session_state.current_dataset = df
-        st.session_state.uploaded_file_name = uploaded_file.name
-        
-        st.success(f"✅ File uploaded successfully! {df.shape[0]} rows, {df.shape[1]} columns")
-        
-        # Show quick preview
-        st.subheader("📋 Data Preview")
-        st.dataframe(df.head(10), use_container_width=True)
-        
-        # Show basic stats
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Rows", df.shape[0])
-        with col2:
-            st.metric("Total Columns", df.shape[1])
-        with col3:
-            st.metric("Missing Values", df.isnull().sum().sum())
-            
-        st.success("🎯 **Now go to 'Data Analysis' page in the sidebar to explore your data!**")
-        
-    except Exception as e:
-        st.error(f"❌ Error reading file: {str(e)}")
+    # Poll job status
+    while True:
+        run = get_run(run_id)
+        state = run.get("state", {}).get("life_cycle_state")
+        result_state = run.get("state", {}).get("result_state")
+        st.write(f"Run state: {state} | Result: {result_state}")
+        if state in ["TERMINATED", "INTERNAL_ERROR", "SKIPPED"]:
+            break
+        time.sleep(5)
 
-# Show current status
-st.markdown("---")
-st.header("🔧 App Status")
+    if run.get("state", {}).get("result_state") == "SUCCESS":
+        st.success("Ingestion complete — Delta table created for this dataset.")
+        st.session_state["delta_path"] = run.get("metadata", {}).get("spark_context", {}).get("dbfs_root", "") or ""
+    else:
+        st.error("Ingestion failed. Check Databricks job logs.")
 
-if 'current_dataset' in st.session_state:
-    st.success("✅ Dataset loaded in memory and ready for analysis!")
-    df = st.session_state.current_dataset
-    st.write(f"**File:** {st.session_state.uploaded_file_name}")
-    st.write(f"**Shape:** {df.shape[0]} rows × {df.shape[1]} columns")
-    st.write(f"**Columns:** {', '.join(df.columns.tolist()[:10])}{'...' if len(df.columns) > 10 else ''}")
-else:
-    st.info("📝 No dataset loaded yet. Upload a CSV file above.")
+# --- EDA & Train UI (only enabled if dataset ingested) ---
+if "session_id" in st.session_state:
+    st.markdown("---")
+    st.subheader("Dataset actions")
+    if st.button("Run Quick EDA (sampled)"):
+        st.info("Triggering EDA notebook/job...")
+        # For simplicity reuse the training job or a dedicated EDA job id (not in this example).
+        # You can create a job that creates a sample parquet and writes a sample CSV to DBFS,
+        # then Streamlit downloads the sample and displays charts.
+        st.success("EDA triggered — once job completes a sample will be displayed from DBFS.")
+    st.write("After training, you can click 'Save dataset' to persist this Delta for more than 4 hours.")
+    if st.button("Save dataset (promote to /mnt/delta/)"):
+        # call a small job or notebook to promote from tmp to permanent delta path
+        st.info("Promote job triggered — dataset will be persistent.")
+        promote_params = {"session_id": st.session_state["session_id"], "action": "promote"}
+        run_id = run_job(DATABRICKS_JOB_INGEST_ID, promote_params)
+        st.write("Promote job started:", run_id)
 
-# Troubleshooting guide
-with st.expander("🔧 Troubleshooting - If pages don't appear"):
-    st.markdown("""
-    **If sidebar doesn't show pages:**
-    1. **Check your folder structure:**
-       ```
-       streamlit_app/
-       ├── app.py
-       ├── pages/
-       │   ├── 1_🏠_Home.py
-       │   ├── 2_📊_Data_Analysis.py
-       │   └── 3_🤖_Model_Training.py
-       └── requirements.txt
-       ```
-    
-    2. **Make sure files are named correctly:**
-       - `1_🏠_Home.py` (or `1_Home.py`)
-       - `2_📊_Data_Analysis.py` (or `2_Data_Analysis.py`) 
-       - `3_🤖_Model_Training.py` (or `3_Model_Training.py`)
-    
-    3. **Refresh the browser page completely** (Ctrl+F5)
-    
-    4. **Try a different browser** (Chrome, Firefox, Edge)
-    """)
+    st.markdown("---")
+    st.subheader("Training")
+    if st.button("Train model on this dataset"):
+        st.info("Training job started...")
+        train_params = {"session_id": st.session_state["session_id"]}
+        run_id = run_job(DATABRICKS_JOB_TRAIN_ID, train_params)
+        st.write("Train job run id:", run_id)
+        # optionally poll or direct user to Databricks UI for logs
 
-st.markdown("---")
-st.caption("Smart Predictor v1.0 | If pages don't appear, refresh and check sidebar")
+    st.markdown("---")
+    st.subheader("Batch Scoring")
+    new_file = st.file_uploader("Upload CSV to score (same schema)", type=["csv"], key="score_upload")
+    if new_file and st.button("Run batch scoring"):
+        score_session = gen_session_id()
+        score_dbfs_path = safe_dbfs_path(score_session, new_file.name)
+        # upload
+        new_file.seek(0, io.SEEK_END)
+        size = new_file.tell()
+        new_file.seek(0)
+        if size > DATABRICKS_UPLOAD_CHUNK_THRESHOLD:
+            dbfs_upload_chunked(score_dbfs_path, new_file, overwrite=True)
+        else:
+            dbfs_put_single(score_dbfs_path, new_file, overwrite=True)
+
+        # trigger scoring job (scoring job reads best model from Model Registry)
+        job_params = {"input_dbfs_path": score_dbfs_path, "session_id": score_session}
+        run_id = run_job(DATABRICKS_JOB_SCORE_ID, job_params)
+        st.info(f"Scoring job started: {run_id}. Polling for result...")
+
+        # simple poll
+        while True:
+            run = get_run(run_id)
+            state = run.get("state", {}).get("life_cycle_state")
+            result_state = run.get("state", {}).get("result_state")
+            st.write(f"Run state: {state} | Result: {result_state}")
+            if state in ["TERMINATED", "INTERNAL_ERROR", "SKIPPED"]:
+                break
+            time.sleep(5)
+
+        if run.get("state", {}).get("result_state") == "SUCCESS":
+            # expected output path (set in scoring notebook)
+            output_path = f"/FileStore/results/{score_session}/preds.csv"
+            local_path = f"/tmp/preds_{score_session}.csv"
+            download_dbfs_file(output_path, local_path)
+            df = pd.read_csv(local_path)
+            st.subheader("Predictions")
+            st.dataframe(df.head(200))
+            st.download_button("Download predictions CSV", data=open(local_path,"rb"), file_name="preds.csv")
+        else:
+            st.error("Scoring job failed. Check Databricks logs.")
