@@ -2,3 +2,6 @@ streamlit
 pandas
 plotly
 requests
+tqdm
+python-dotenv
+mlflow
