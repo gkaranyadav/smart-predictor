@@ -179,7 +179,7 @@ elif page == "Batch Scoring":
                         input_dbfs_path = scoring_dbfs_path
                     else:
                         st.error(f"❌ Scoring file upload failed: {upload_result['message']}")
-                        return
+                        # Continue with original file instead of returning
                 
                 # Run scoring job
                 result = run_job(SCORE_JOB_ID, {
