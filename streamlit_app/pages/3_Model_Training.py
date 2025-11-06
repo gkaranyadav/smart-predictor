@@ -1,4 +1,19 @@
 import streamlit as st
+
+def main():
+    # ALL YOUR EXISTING MODEL TRAINING CODE GOES HERE
+    
+    st.set_page_config(
+        page_title="Model Training - Smart Predictor",
+        page_icon="🤖", 
+        layout="wide"
+    )
+
+    st.title("🤖 Model Training")
+    # ... rest of your code ...
+
+# Add this at the bottom  
+import streamlit as st
 import pandas as pd
 import numpy as np
 import time
@@ -291,3 +306,5 @@ with st.expander("⚡ About Hyperparameter Tuning"):
 # Footer
 st.markdown("---")
 st.caption("💡 **Pro Tip**: Enable hyperparameter tuning and use cross-validation for more reliable models!")
+if __name__ == "__main__":
+    main()
