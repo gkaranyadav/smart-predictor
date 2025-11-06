@@ -460,4 +460,4 @@ def get_run_details(run_id):
         }
             
     except Exception as e:
-        return {"status": "error", "message": f"Error getting run details: {str(e)}"}
+    return {"status": "error", "message": f"Error getting run details: {str(e)}"}
