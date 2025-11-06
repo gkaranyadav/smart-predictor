@@ -3,7 +3,11 @@ import streamlit as st
 import pandas as pd
 import time
 import json
-from databricks_api import dbfs_put_single, dbfs_upload_chunked, upload_to_dbfs_simple, run_job, get_job_output, dbfs_read_file, dbfs_file_exists
+from databricks_api import (
+    dbfs_put_single, dbfs_upload_chunked, upload_to_dbfs_simple, 
+    run_job, get_job_output, get_task_runs, get_task_output, 
+    get_run_details, dbfs_read_file, dbfs_file_exists
+)
 from utils import gen_session_id, safe_dbfs_path
 
 # Page configuration
@@ -136,7 +140,20 @@ elif page == "Data Analysis":
         # Display previous results if available
         if st.session_state.analysis_results:
             st.subheader("📊 Previous Analysis Results")
-            st.json(st.session_state.analysis_results)
+            
+            # Display task outputs if available
+            if "task_outputs" in st.session_state.analysis_results:
+                task_outputs = st.session_state.analysis_results["task_outputs"]
+                for task_key, task_data in task_outputs.items():
+                    with st.expander(f"Task: {task_key}"):
+                        if "output" in task_data:
+                            output = task_data["output"]
+                            if "notebook_output" in output and output["notebook_output"]:
+                                st.write("Notebook Output:")
+                                st.code(str(output["notebook_output"]))
+                            if "logs" in output and output["logs"]:
+                                st.write("Logs:")
+                                st.text_area(f"Logs - {task_key}", output["logs"], height=150, key=f"logs_{task_key}")
         
         # Trigger Ingest Job for EDA
         if st.button("Run Data Analysis"):
@@ -154,36 +171,94 @@ elif page == "Data Analysis":
                     run_id = result.get('run_id')
                     if run_id:
                         with st.spinner("Fetching analysis results..."):
-                            output_result = get_job_output(run_id)
+                            # First try to get task outputs (for multi-task jobs)
+                            task_result = get_task_runs(run_id)
                             
-                            if output_result["status"] == "success":
-                                st.session_state.analysis_results = output_result
+                            if task_result["status"] == "success":
+                                st.session_state.analysis_results = task_result
                                 
                                 st.subheader("📈 Analysis Results")
                                 
-                                # Display notebook output
-                                notebook_output = output_result.get("notebook_output", {})
-                                if notebook_output:
-                                    st.write("Notebook Output:")
-                                    st.code(str(notebook_output))
+                                # Display task information
+                                task_outputs = task_result.get("task_outputs", {})
+                                run_info = task_result.get("run_info", {})
                                 
-                                # Display logs
-                                logs = output_result.get("logs", "")
-                                if logs:
-                                    st.write("Job Logs:")
-                                    st.text_area("Logs", logs, height=200)
+                                st.info(f"Job completed with {len(task_outputs)} task(s)")
+                                
+                                # Display each task output
+                                for task_key, task_data in task_outputs.items():
+                                    with st.expander(f"📋 Task: {task_key}", expanded=True):
+                                        if "output" in task_data:
+                                            output = task_data["output"]
+                                            
+                                            # Display notebook output
+                                            notebook_output = output.get("notebook_output", {})
+                                            if notebook_output:
+                                                result_text = notebook_output.get("result", "")
+                                                if result_text:
+                                                    st.success(f"Result: {result_text}")
+                                            
+                                            # Display logs
+                                            logs = output.get("logs", "")
+                                            if logs:
+                                                st.write("Execution Logs:")
+                                                st.text_area("Logs", logs, height=200, key=f"logs_{task_key}")
+                                            
+                                            # Display metadata
+                                            metadata = output.get("metadata", {})
+                                            if metadata:
+                                                st.write("Task Metadata:")
+                                                st.json(metadata)
+                                        
+                                        elif "error" in task_data:
+                                            st.error(f"Error: {task_data['error']}")
                                 
                                 # Try to get sample data
                                 sample_path = f"/FileStore/tmp/{st.session_state.session_id}/sample.csv"
                                 if dbfs_file_exists(sample_path):
                                     sample_result = dbfs_read_file(sample_path)
                                     if sample_result["status"] == "success":
-                                        st.write("Sample Data Created:")
-                                        st.success(f"Sample data available at: {sample_path}")
+                                        try:
+                                            # Display sample data
+                                            from io import StringIO
+                                            sample_df = pd.read_csv(StringIO(sample_result["content"]))
+                                            st.subheader("📊 Sample Data (First 10K rows)")
+                                            st.dataframe(sample_df.head(10))
+                                            st.write(f"Sample shape: {sample_df.shape}")
+                                            
+                                            # Show basic statistics
+                                            st.subheader("📈 Basic Statistics")
+                                            st.dataframe(sample_df.describe())
+                                            
+                                        except Exception as e:
+                                            st.error(f"Error displaying sample data: {str(e)}")
                                 
                                 st.balloons()
+                                
                             else:
-                                st.error(f"❌ Failed to get job output: {output_result['message']}")
+                                # Fallback: try direct output (for single-task jobs)
+                                st.warning("Multi-task job detected, trying alternative approach...")
+                                output_result = get_job_output(run_id)
+                                
+                                if output_result["status"] == "success":
+                                    st.session_state.analysis_results = output_result
+                                    st.subheader("📈 Analysis Results")
+                                    
+                                    # Display notebook output
+                                    notebook_output = output_result.get("notebook_output", {})
+                                    if notebook_output:
+                                        st.write("Notebook Output:")
+                                        st.code(str(notebook_output))
+                                    
+                                    # Display logs
+                                    logs = output_result.get("logs", "")
+                                    if logs:
+                                        st.write("Job Logs:")
+                                        st.text_area("Logs", logs, height=200)
+                                    
+                                    st.balloons()
+                                else:
+                                    st.error(f"❌ Failed to get job output: {output_result['message']}")
                     else:
                         st.info("Analysis completed. Check Databricks workspace for detailed results.")
                 else:
@@ -201,7 +276,15 @@ elif page == "Model Training":
         # Display previous training results if available
         if st.session_state.training_results:
             st.subheader("📊 Previous Training Results")
-            st.json(st.session_state.training_results.get("output", {}))
+            
+            if "task_outputs" in st.session_state.training_results:
+                task_outputs = st.session_state.training_results["task_outputs"]
+                for task_key, task_data in task_outputs.items():
+                    with st.expander(f"Task: {task_key}"):
+                        if "output" in task_data:
+                            output = task_data["output"]
+                            if "notebook_output" in output and output["notebook_output"]:
+                                st.code(str(output["notebook_output"]))
         
         col1, col2 = st.columns(2)
         
@@ -235,28 +318,53 @@ elif page == "Model Training":
                     run_id = result.get('run_id')
                     if run_id:
                         with st.spinner("Fetching training results..."):
-                            output_result = get_job_output(run_id)
+                            # Try task outputs first (for multi-task jobs)
+                            task_result = get_task_runs(run_id)
                             
-                            if output_result["status"] == "success":
-                                st.session_state.training_results = output_result
+                            if task_result["status"] == "success":
+                                st.session_state.training_results = task_result
                                 
                                 st.subheader("🎯 Training Results")
                                 st.success("Model trained and registered in MLflow!")
+                                
+                                # Display task outputs
+                                task_outputs = task_result.get("task_outputs", {})
+                                for task_key, task_data in task_outputs.items():
+                                    with st.expander(f"Training Task: {task_key}"):
+                                        if "output" in task_data:
+                                            output = task_data["output"]
+                                            notebook_output = output.get("notebook_output", {})
+                                            if notebook_output:
+                                                st.code(str(notebook_output))
                                 
                                 # Display model info
                                 model_name = f"smart_predictor_model_{st.session_state.session_id}"
                                 st.write(f"**Model Name:** {model_name}")
                                 st.write(f"**Model URI:** models:/{model_name}/latest")
                                 
-                                # Display notebook output
-                                notebook_output = output_result.get("notebook_output", {})
-                                if notebook_output:
-                                    st.write("Training Output:")
-                                    st.code(str(notebook_output))
-                                
                                 st.balloons()
                             else:
-                                st.error(f"❌ Failed to get training results: {output_result['message']}")
+                                # Fallback to direct output
+                                output_result = get_job_output(run_id)
+                                if output_result["status"] == "success":
+                                    st.session_state.training_results = output_result
+                                    st.subheader("🎯 Training Results")
+                                    st.success("Model trained and registered in MLflow!")
+                                    
+                                    # Display model info
+                                    model_name = f"smart_predictor_model_{st.session_state.session_id}"
+                                    st.write(f"**Model Name:** {model_name}")
+                                    st.write(f"**Model URI:** models:/{model_name}/latest")
+                                    
+                                    # Display notebook output
+                                    notebook_output = output_result.get("notebook_output", {})
+                                    if notebook_output:
+                                        st.write("Training Output:")
+                                        st.code(str(notebook_output))
+                                    
+                                    st.balloons()
+                                else:
+                                    st.error(f"❌ Failed to get training results: {output_result['message']}")
                 else:
                     st.error(f"❌ Model training failed: {result['message']}")
     else:
@@ -272,7 +380,15 @@ elif page == "Batch Scoring":
         # Display previous scoring results if available
         if st.session_state.scoring_results:
             st.subheader("📊 Previous Scoring Results")
-            st.json(st.session_state.scoring_results.get("output", {}))
+            
+            if "task_outputs" in st.session_state.scoring_results:
+                task_outputs = st.session_state.scoring_results["task_outputs"]
+                for task_key, task_data in task_outputs.items():
+                    with st.expander(f"Task: {task_key}"):
+                        if "output" in task_data:
+                            output = task_data["output"]
+                            if "notebook_output" in output and output["notebook_output"]:
+                                st.code(str(output["notebook_output"]))
         
         # Option to upload new data for scoring or use existing
         scoring_file = st.file_uploader(
@@ -311,13 +427,24 @@ elif page == "Batch Scoring":
                     run_id = result.get('run_id')
                     if run_id:
                         with st.spinner("Fetching scoring results..."):
-                            output_result = get_job_output(run_id)
+                            # Try task outputs first (for multi-task jobs)
+                            task_result = get_task_runs(run_id)
                             
-                            if output_result["status"] == "success":
-                                st.session_state.scoring_results = output_result
+                            if task_result["status"] == "success":
+                                st.session_state.scoring_results = task_result
                                 
                                 st.subheader("🎯 Scoring Results")
                                 st.success("Predictions generated successfully!")
+                                
+                                # Display task outputs
+                                task_outputs = task_result.get("task_outputs", {})
+                                for task_key, task_data in task_outputs.items():
+                                    with st.expander(f"Scoring Task: {task_key}"):
+                                        if "output" in task_data:
+                                            output = task_data["output"]
+                                            notebook_output = output.get("notebook_output", {})
+                                            if notebook_output:
+                                                st.code(str(notebook_output))
                                 
                                 # Display predictions info
                                 predictions_path = f"/FileStore/results/{st.session_state.session_id}/predictions.csv"
@@ -353,7 +480,48 @@ elif page == "Batch Scoring":
                                 
                                 st.balloons()
                             else:
-                                st.error(f"❌ Failed to get scoring results: {output_result['message']}")
+                                # Fallback to direct output
+                                output_result = get_job_output(run_id)
+                                if output_result["status"] == "success":
+                                    st.session_state.scoring_results = output_result
+                                    st.subheader("🎯 Scoring Results")
+                                    st.success("Predictions generated successfully!")
+                                    
+                                    # Display predictions info
+                                    predictions_path = f"/FileStore/results/{st.session_state.session_id}/predictions.csv"
+                                    st.write(f"**Predictions saved to:** {predictions_path}")
+                                    
+                                    # Try to download and display predictions
+                                    if dbfs_file_exists(predictions_path):
+                                        pred_result = dbfs_read_file(predictions_path)
+                                        if pred_result["status"] == "success":
+                                            try:
+                                                # Read the CSV content
+                                                from io import StringIO
+                                                predictions_df = pd.read_csv(StringIO(pred_result["content"]))
+                                                st.write("**Sample Predictions:**")
+                                                st.dataframe(predictions_df.head(10))
+                                                
+                                                # Show prediction distribution
+                                                if 'prediction' in predictions_df.columns:
+                                                    st.write("**Prediction Distribution:**")
+                                                    pred_counts = predictions_df['prediction'].value_counts()
+                                                    st.bar_chart(pred_counts)
+                                                    
+                                                # Download button
+                                                csv = predictions_df.to_csv(index=False)
+                                                st.download_button(
+                                                    label="📥 Download Predictions",
+                                                    data=csv,
+                                                    file_name=f"predictions_{st.session_state.session_id}.csv",
+                                                    mime="text/csv"
+                                                )
+                                            except Exception as e:
+                                                st.error(f"Error displaying predictions: {str(e)}")
+                                    
+                                    st.balloons()
+                                else:
+                                    st.error(f"❌ Failed to get scoring results: {output_result['message']}")
                 else:
                     st.error(f"❌ Batch scoring failed: {result['message']}")
     else:
