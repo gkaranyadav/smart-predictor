@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 import time
-from databricks_api import dbfs_put_single, dbfs_upload_chunked, run_job
+from databricks_api import dbfs_put_single, dbfs_upload_chunked, upload_to_dbfs_simple, run_job
 from utils import gen_session_id, safe_dbfs_path
 
 # Page configuration
@@ -12,6 +12,38 @@ st.set_page_config(
     layout="wide"
 )
 
+# Safe secret loading with fallbacks
+def get_secret(key, default=None):
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return default
+
+# Job IDs from Streamlit Cloud secrets with fallbacks
+INGEST_JOB_ID = get_secret("DATABRICKS_JOB_INGEST_ID", "675344377204129")
+TRAIN_JOB_ID = get_secret("DATABRICKS_JOB_TRAIN_ID", "362348352440928")
+SCORE_JOB_ID = get_secret("DATABRICKS_JOB_SCORE_ID", "100926012778266")
+
+# Check if secrets are configured
+if not get_secret("DATABRICKS_HOST") or not get_secret("DATABRICKS_TOKEN"):
+    st.error("""
+    ❌ **Databricks credentials not configured!**
+    
+    Please add these secrets in Streamlit Cloud:
+    1. Go to your app settings
+    2. Click on 'Secrets' 
+    3. Add:
+    
+    ```toml
+    DATABRICKS_HOST = "https://dbc-484c2988-d6e6.cloud.databricks.com"
+    DATABRICKS_TOKEN = "dapi1234567890abcdef..."
+    DATABRICKS_JOB_INGEST_ID = "675344377204129"
+    DATABRICKS_JOB_TRAIN_ID = "362348352440928"
+    DATABRICKS_JOB_SCORE_ID = "100926012778266"
+    ```
+    """)
+    st.stop()
+
 # Initialize session state
 if 'session_id' not in st.session_state:
     st.session_state.session_id = None
@@ -19,11 +51,6 @@ if 'current_file' not in st.session_state:
     st.session_state.current_file = None
 if 'upload_complete' not in st.session_state:
     st.session_state.upload_complete = False
-
-# Job IDs from Streamlit Cloud secrets
-INGEST_JOB_ID = st.secrets["DATABRICKS_JOB_INGEST_ID"]
-TRAIN_JOB_ID = st.secrets["DATABRICKS_JOB_TRAIN_ID"]
-SCORE_JOB_ID = st.secrets["DATABRICKS_JOB_SCORE_ID"]
 
 # App title and description
 st.title("🚀 Smart Predictor")
@@ -59,29 +86,34 @@ if page == "Home":
             with st.spinner("Uploading file to Databricks..."):
                 dbfs_path = safe_dbfs_path(session_id, uploaded_file.name)
                 
-                # Decide chunked or single upload based on file size
-                if uploaded_file.size > 2 * 1024 * 1024:  # 2MB threshold
-                    result = dbfs_upload_chunked(dbfs_path, uploaded_file, overwrite=True)
-                else:
-                    result = dbfs_put_single(dbfs_path, uploaded_file, overwrite=True)
+                # Use the simple upload method that handles both small and large files
+                result = upload_to_dbfs_simple(uploaded_file, dbfs_path)
                 
                 if result["status"] == "success":
                     st.session_state.upload_complete = True
                     st.session_state.dbfs_path = dbfs_path
                     st.success(f"✅ {result['message']}")
+                    
+                    # Show preview of uploaded data
+                    st.subheader("Data Preview")
+                    try:
+                        uploaded_file.seek(0)  # Reset file pointer
+                        df_preview = pd.read_csv(uploaded_file, nrows=5)
+                        st.dataframe(df_preview)
+                        st.write(f"Shape: {len(df_preview)} rows x {len(df_preview.columns)} columns")
+                        
+                        # Show column names and types
+                        st.subheader("Data Types")
+                        col_info = pd.DataFrame({
+                            'Column': df_preview.columns,
+                            'Type': [str(dtype) for dtype in df_preview.dtypes]
+                        })
+                        st.dataframe(col_info)
+                        
+                    except Exception as e:
+                        st.error(f"Error previewing data: {str(e)}")
                 else:
                     st.error(f"❌ {result['message']}")
-        
-        # Show preview of uploaded data
-        if st.session_state.upload_complete:
-            st.subheader("Data Preview")
-            try:
-                uploaded_file.seek(0)  # Reset file pointer
-                df_preview = pd.read_csv(uploaded_file, nrows=5)
-                st.dataframe(df_preview)
-                st.write(f"Shape: {len(df_preview)} rows x {len(df_preview.columns)} columns")
-            except Exception as e:
-                st.error(f"Error previewing data: {str(e)}")
 
 # Data Analysis Page
 elif page == "Data Analysis":
@@ -93,6 +125,7 @@ elif page == "Data Analysis":
         # Trigger Ingest Job for EDA
         if st.button("Run Data Analysis"):
             with st.spinner("Running data analysis..."):
+                # USING JOB PARAMETERS (not notebook_params)
                 result = run_job(INGEST_JOB_ID, {
                     "dbfs_path": st.session_state.dbfs_path,
                     "session_id": st.session_state.session_id
@@ -100,7 +133,6 @@ elif page == "Data Analysis":
                 
                 if result["status"] == "success":
                     st.success(f"✅ Data analysis completed! Run ID: {result.get('run_id', 'N/A')}")
-                    # Here you would typically fetch and display the analysis results
                     st.info("Analysis results would be displayed here once the job completes.")
                 else:
                     st.error(f"❌ Data analysis failed: {result['message']}")
@@ -131,9 +163,10 @@ elif page == "Model Training":
         
         if st.button("🚀 Train Model"):
             with st.spinner("Training model... This may take several minutes."):
+                # USING JOB PARAMETERS (not notebook_params)
                 result = run_job(TRAIN_JOB_ID, {
                     "session_id": st.session_state.session_id,
-                    "target_column": target_column,
+                    "target_column": target_column if target_column else "",
                     "test_size": str(test_size),
                     "random_state": str(random_state)
                 })
@@ -170,18 +203,14 @@ elif page == "Batch Scoring":
                         scoring_file.name
                     )
                     
-                    if scoring_file.size > 2 * 1024 * 1024:
-                        upload_result = dbfs_upload_chunked(scoring_dbfs_path, scoring_file, overwrite=True)
-                    else:
-                        upload_result = dbfs_put_single(scoring_dbfs_path, scoring_file, overwrite=True)
+                    upload_result = upload_to_dbfs_simple(scoring_file, scoring_dbfs_path)
                     
                     if upload_result["status"] == "success":
                         input_dbfs_path = scoring_dbfs_path
                     else:
                         st.error(f"❌ Scoring file upload failed: {upload_result['message']}")
-                        # Continue with original file instead of returning
                 
-                # Run scoring job
+                # USING JOB PARAMETERS (not notebook_params)
                 result = run_job(SCORE_JOB_ID, {
                     "input_dbfs_path": input_dbfs_path,
                     "session_id": st.session_state.session_id
