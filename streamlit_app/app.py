@@ -245,12 +245,14 @@ elif page == "Model Training":
                 ["AutoML (Recommended)", "Random Forest", "Logistic Regression", "Gradient Boosting"]
             )
             
+            # Initialize suggested_target
+            suggested_target = ""
+            
             # Show available columns and suggest target
             if st.session_state.available_columns:
                 st.info(f"📋 Available columns: {', '.join(st.session_state.available_columns)}")
                 
                 # Auto-suggest target column
-                suggested_target = ""
                 if 'Diabetes_binary' in st.session_state.available_columns:
                     suggested_target = 'Diabetes_binary'
                 elif 'diabetes_binary' in [col.lower() for col in st.session_state.available_columns]:
