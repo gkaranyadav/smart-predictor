@@ -5,3 +5,4 @@ requests
 tqdm
 python-dotenv
 mlflow
+scikit-learn
