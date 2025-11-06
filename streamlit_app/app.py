@@ -3,7 +3,8 @@ import streamlit as st
 import pandas as pd
 import time
 import json
-from databricks_api import dbfs_put_single, dbfs_upload_chunked, upload_to_dbfs_simple, run_job, get_job_output, dbfs_read_file, dbfs_file_exists
+import io
+from databricks_api import dbfs_put_single, dbfs_upload_chunked, upload_to_dbfs_simple, run_job, get_job_output, dbfs_read_file, dbfs_file_exists, dbfs_list_files
 from utils import gen_session_id, safe_dbfs_path
 
 # Page configuration
@@ -60,6 +61,101 @@ if 'scoring_results' not in st.session_state:
     st.session_state.scoring_results = None
 if 'available_columns' not in st.session_state:
     st.session_state.available_columns = []
+if 'predictions_data' not in st.session_state:
+    st.session_state.predictions_data = None
+
+# Helper functions for prediction handling
+def load_predictions_from_directory(directory_path):
+    """Load predictions from Spark output directory by combining all part files"""
+    try:
+        # List all files in the directory
+        files_result = dbfs_list_files(directory_path)
+        if files_result["status"] != "success":
+            return None
+            
+        files = files_result.get("files", [])
+        if not files:
+            return None
+            
+        # Find all CSV part files
+        csv_files = [f for f in files if f["path"].endswith(".csv") and "part-" in f["path"]]
+        if not csv_files:
+            return None
+            
+        # Read and combine all part files
+        all_data = []
+        for file_info in csv_files:
+            file_path = file_info["path"]
+            file_result = dbfs_read_file(file_path)
+            if file_result["status"] == "success":
+                try:
+                    # Read CSV content
+                    content = file_result["content"]
+                    df_part = pd.read_csv(io.StringIO(content))
+                    all_data.append(df_part)
+                except Exception as e:
+                    continue
+        
+        if not all_data:
+            return None
+            
+        # Combine all parts
+        combined_df = pd.concat(all_data, ignore_index=True)
+        return combined_df
+        
+    except Exception as e:
+        return None
+
+def load_predictions_from_single_file(file_path):
+    """Load predictions from a single CSV file"""
+    try:
+        file_result = dbfs_read_file(file_path)
+        if file_result["status"] == "success":
+            content = file_result["content"]
+            df = pd.read_csv(io.StringIO(content))
+            return df
+    except Exception as e:
+        return None
+    return None
+
+def display_predictions(predictions_df, session_id):
+    """Display predictions with download option"""
+    if predictions_df is None or len(predictions_df) == 0:
+        return False
+        
+    st.subheader("🎯 Prediction Results")
+    
+    # Display sample predictions
+    st.write("**Sample Predictions:**")
+    st.dataframe(predictions_df.head(10))
+    
+    # Show prediction distribution
+    if 'prediction' in predictions_df.columns:
+        st.write("**Prediction Distribution:**")
+        pred_counts = predictions_df['prediction'].value_counts()
+        st.bar_chart(pred_counts)
+        
+        # Show prediction statistics
+        st.write("**Prediction Statistics:**")
+        st.write(f"Total predictions: {len(predictions_df):,}")
+        st.write(f"Unique predictions: {predictions_df['prediction'].nunique()}")
+        
+        # Show accuracy if we have actual values
+        if 'Diabetes_binary' in predictions_df.columns:
+            accuracy = (predictions_df['prediction'] == predictions_df['Diabetes_binary']).mean()
+            st.write(f"**Accuracy vs actual:** {accuracy:.4f}")
+    
+    # Download button
+    csv = predictions_df.to_csv(index=False)
+    st.download_button(
+        label="📥 Download Full Predictions CSV",
+        data=csv,
+        file_name=f"predictions_{session_id}.csv",
+        mime="text/csv",
+        key=f"download_{session_id}"
+    )
+    
+    return True
 
 # App title and description
 st.title("🚀 Smart Predictor")
@@ -364,10 +460,56 @@ elif page == "Batch Scoring":
         st.success("✅ File uploaded successfully!")
         st.info("Generate predictions using your trained model")
         
+        # Add refresh button
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            if st.button("🔄 Refresh Predictions", key="refresh_predictions"):
+                st.rerun()
+        
         # Display previous scoring results if available
         if st.session_state.scoring_results:
             st.subheader("📊 Previous Scoring Results")
             st.json(st.session_state.scoring_results)
+            
+            # Try to load and display previous predictions
+            predictions_base_path = f"/FileStore/results/{st.session_state.session_id}"
+            st.info("🔄 Loading predictions...")
+            
+            # Try multiple approaches to find predictions
+            predictions_df = None
+            
+            # Approach 1: Try to load from directory (Spark part files)
+            predictions_df = load_predictions_from_directory(predictions_base_path)
+            
+            # Approach 2: Try specific file paths
+            if predictions_df is None:
+                possible_files = [
+                    f"{predictions_base_path}/predictions.csv/part-00000-*.csv",
+                    f"{predictions_base_path}/predictions_single.csv/part-00000-*.csv",
+                    f"{predictions_base_path}/predictions.csv",
+                    f"{predictions_base_path}/predictions_single.csv"
+                ]
+                for file_path in possible_files:
+                    predictions_df = load_predictions_from_single_file(file_path)
+                    if predictions_df is not None:
+                        break
+            
+            # Display predictions if found
+            if predictions_df is not None:
+                st.session_state.predictions_data = predictions_df
+                display_success = display_predictions(predictions_df, st.session_state.session_id)
+                if display_success:
+                    st.balloons()
+                    return
+            else:
+                st.warning("📁 Predictions not found in automatic search.")
+                st.info("""
+                **Manual Access Instructions:**
+                1. Go to **Databricks Workspace** → **Data** → **DBFS**
+                2. Navigate to: `FileStore/results/{session_id}/`
+                3. Look for CSV files (may be in subdirectories)
+                4. Download and check the files manually
+                """)
         
         # Option to upload new data for scoring or use existing
         scoring_file = st.file_uploader(
@@ -424,100 +566,26 @@ elif page == "Batch Scoring":
                         st.write(f"**Predictions saved to:** {predictions_base_path}/")
                         st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
                         
-                        # Try to download and display predictions
-                        st.info("🔍 Looking for prediction files...")
+                        # Try to load predictions immediately
+                        st.info("🔍 Loading predictions...")
+                        predictions_df = load_predictions_from_directory(predictions_base_path)
                         
-                        # Try multiple possible file locations (Spark creates directories with part files)
-                        possible_paths = [
-                            f"{predictions_base_path}/predictions.csv/part-00000-*.csv",
-                            f"{predictions_base_path}/predictions_single.csv/part-00000-*.csv", 
-                            f"{predictions_base_path}/predictions.csv",
-                            f"{predictions_base_path}/predictions_single.csv"
-                        ]
-                        
-                        predictions_found = False
-                        predictions_df = None
-                        found_path = None
-                        
-                        for pred_path in possible_paths:
-                            try:
-                                # Try to read the file
-                                pred_result = dbfs_read_file(pred_path)
-                                if pred_result["status"] == "success":
-                                    try:
-                                        # Read the CSV content
-                                        from io import StringIO
-                                        predictions_df = pd.read_csv(StringIO(pred_result["content"]))
-                                        st.success(f"✅ Predictions found at: {pred_path}")
-                                        predictions_found = True
-                                        found_path = pred_path
-                                        break
-                                    except Exception as e:
-                                        continue  # Try next path
-                            except:
-                                continue  # Try next path
-                        
-                        if predictions_found and predictions_df is not None:
-                            st.write("**Sample Predictions:**")
-                            st.dataframe(predictions_df.head(10))
-                            
-                            # Show prediction distribution
-                            if 'prediction' in predictions_df.columns:
-                                st.write("**Prediction Distribution:**")
-                                pred_counts = predictions_df['prediction'].value_counts()
-                                st.bar_chart(pred_counts)
-                                
-                                # Show prediction statistics
-                                st.write("**Prediction Statistics:**")
-                                st.write(f"Total predictions: {len(predictions_df)}")
-                                st.write(f"Unique predictions: {predictions_df['prediction'].nunique()}")
-                                
-                                # Show accuracy if we have actual values
-                                if 'Diabetes_binary' in predictions_df.columns:
-                                    accuracy = (predictions_df['prediction'] == predictions_df['Diabetes_binary']).mean()
-                                    st.write(f"**Accuracy vs actual:** {accuracy:.4f}")
-                                
-                                # Download button
-                                csv = predictions_df.to_csv(index=False)
-                                st.download_button(
-                                    label="📥 Download Predictions",
-                                    data=csv,
-                                    file_name=f"predictions_{st.session_state.session_id}.csv",
-                                    mime="text/csv"
-                                )
-                                
-                                st.success("🎉 **Predictions ready! You can download them using the button above.**")
+                        if predictions_df is not None:
+                            st.session_state.predictions_data = predictions_df
+                            display_success = display_predictions(predictions_df, st.session_state.session_id)
+                            if display_success:
+                                st.balloons()
                         else:
-                            st.warning("⚠️ Predictions file not found in the expected locations.")
+                            st.warning("⏳ Predictions are being processed...")
                             st.info("""
-                            **This is normal - Spark creates files in parts. Here's how to access your predictions:**
-                            
-                            1. **Wait a moment** - Files might still be processing
-                            2. **Check Databricks workspace** - Go to Data → DBFS → FileStore → results → {session_id}
-                            3. **Look for CSV files** in the predictions directory
-                            4. **Refresh this page** after a minute to try again
-                            
-                            **Your predictions are successfully generated and saved in Databricks!**
+                            **Next Steps:**
+                            1. Wait a few moments and click the **🔄 Refresh Predictions** button above
+                            2. Predictions are being saved by Spark (this takes a moment)
+                            3. Your predictions will appear here automatically when ready
                             """)
                         
-                        st.info("""
-                        **What happened:**
-                        - ✅ Batch scoring job completed successfully
-                        - ✅ Predictions were generated (253,680 total)
-                        - ✅ Results saved to Databricks DBFS
-                        - 🔄 Files are being processed by Spark
-                        """)
-                        
-                        st.balloons()
                     else:
                         st.error(f"❌ Batch scoring failed: {result['message']}")
-                        st.info("""
-                        **Troubleshooting Tips:**
-                        1. Make sure the training completed successfully
-                        2. Check that the input file exists in DBFS
-                        3. Verify the scoring job is configured correctly
-                        4. Check Databricks job logs for detailed error messages
-                        """)
     else:
         st.warning("⚠️ Please upload a CSV file first from the Home page.")
 
