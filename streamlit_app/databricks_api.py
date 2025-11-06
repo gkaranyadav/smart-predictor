@@ -50,19 +50,79 @@ def dbfs_put_single(path, file_obj, overwrite=False):
     except Exception as e:
         return {"status": "error", "message": f"Upload failed: {str(e)}"}
 
+def dbfs_upload_chunked(path, file_obj, overwrite=False, chunk_size=1*1024*1024):
+    """
+    Upload large files to DBFS using create -> add-block -> close
+    """
+    try:
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            return {"status": "error", "message": "Databricks credentials not configured"}
+            
+        base_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs"
+        
+        # 1) Create handle
+        create_url = f"{base_url}/create"
+        create_payload = {"path": path, "overwrite": overwrite}
+        create_response = requests.post(create_url, json=create_payload, headers=HEADERS)
+        create_response.raise_for_status()
+        handle = create_response.json()["handle"]
+        
+        # 2) Upload chunks
+        file_obj.seek(0)
+        chunk_count = 0
+        total_size = 0
+        
+        while True:
+            chunk = file_obj.read(chunk_size)
+            if not chunk:
+                break
+                
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8")
+                
+            chunk_b64 = base64.b64encode(chunk).decode("utf-8")
+            
+            add_block_url = f"{base_url}/add-block"
+            add_block_payload = {
+                "handle": handle,
+                "data": chunk_b64
+            }
+            
+            add_block_response = requests.post(add_block_url, json=add_block_payload, headers=HEADERS)
+            add_block_response.raise_for_status()
+            
+            chunk_count += 1
+            total_size += len(chunk)
+        
+        # 3) Close handle
+        close_url = f"{base_url}/close"
+        close_payload = {"handle": handle}
+        close_response = requests.post(close_url, json=close_payload, headers=HEADERS)
+        close_response.raise_for_status()
+        
+        return {
+            "status": "success", 
+            "message": f"File uploaded successfully in {chunk_count} chunks ({total_size/(1024*1024):.2f} MB)"
+        }
+        
+    except Exception as e:
+        return {"status": "error", "message": f"Chunked upload failed: {str(e)}"}
+
 def upload_to_dbfs_simple(file_obj, dbfs_path):
     try:
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
         
+        # Get file size
         file_obj.seek(0, 2)
         file_size = file_obj.tell()
         file_obj.seek(0)
         
-        if file_size <= 10 * 1024 * 1024:
+        if file_size <= 10 * 1024 * 1024:  # 10MB
             return dbfs_put_single(dbfs_path, file_obj, overwrite=True)
         else:
-            return {"status": "error", "message": "Large files not supported in this version"}
+            return dbfs_upload_chunked(dbfs_path, file_obj, overwrite=True)
+            
     except Exception as e:
         return {"status": "error", "message": f"Upload failed: {str(e)}"}
 
