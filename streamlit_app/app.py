@@ -3,8 +3,7 @@ import pandas as pd
 import requests
 import json
 import time
-import tempfile
-import os
+import base64
 from io import BytesIO
 
 # Page configuration
@@ -39,7 +38,7 @@ def get_databricks_config():
         return None
 
 def create_table_from_csv(uploaded_file, config):
-    """Upload CSV and create temporary table in hive_metastore"""
+    """Upload CSV and create temporary table using Databricks API"""
     try:
         # Generate unique table name
         timestamp = int(time.time())
@@ -50,18 +49,68 @@ def create_table_from_csv(uploaded_file, config):
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file)
             
-            # Upload CSV to DBFS temporarily
+            # Step 1: Upload CSV to DBFS first
             temp_csv_path = f"/FileStore/temp_{timestamp}_{uploaded_file.name}"
             
-            # Convert pandas to Spark DataFrame and save as table
-            spark_df = spark.createDataFrame(df)
-            spark_df.write.mode("overwrite").saveAsTable(f"hive_metastore.default.{table_name}")
+            # Convert DataFrame to CSV string
+            csv_content = df.to_csv(index=False)
             
-            st.success(f"✅ Table created successfully: {table_name}")
-            st.info(f"**Table Location:** `hive_metastore.default.{table_name}`")
-            st.info(f"**Data Shape:** {df.shape} | **Size:** {len(uploaded_file.getvalue()) / (1024*1024):.2f} MB")
+            # Upload CSV to DBFS using API
+            upload_url = f"{config['host']}/api/2.0/dbfs/put"
+            headers = {
+                "Authorization": f"Bearer {config['token']}",
+                "Content-Type": "application/json"
+            }
             
-            return table_name
+            upload_data = {
+                "path": temp_csv_path,
+                "contents": base64.b64encode(csv_content.encode('utf-8')).decode('utf-8'),
+                "overwrite": True
+            }
+            
+            upload_response = requests.post(upload_url, headers=headers, json=upload_data)
+            
+            if upload_response.status_code != 200:
+                st.error(f"❌ Failed to upload CSV to DBFS: {upload_response.text}")
+                return None
+            
+            # Step 2: Create table from CSV using Databricks SQL API
+            create_table_sql = f"""
+            CREATE OR REPLACE TABLE hive_metastore.default.{table_name}
+            USING CSV
+            OPTIONS (
+                path "dbfs:{temp_csv_path}",
+                header "true",
+                inferSchema "true"
+            )
+            """
+            
+            # Execute SQL using Databricks API
+            sql_url = f"{config['host']}/api/2.0/sql/statements"
+            sql_data = {
+                "statement": create_table_sql,
+                "warehouse_id": "auto"  # Use auto-detected warehouse
+            }
+            
+            sql_response = requests.post(sql_url, headers=headers, json=sql_data)
+            
+            if sql_response.status_code == 200:
+                st.success(f"✅ Table created successfully: {table_name}")
+                st.info(f"**Table Location:** `hive_metastore.default.{table_name}`")
+                st.info(f"**Data Shape:** {df.shape} | **Size:** {len(uploaded_file.getvalue()) / (1024*1024):.2f} MB")
+                
+                # Clean up temporary CSV file
+                try:
+                    delete_url = f"{config['host']}/api/2.0/dbfs/delete"
+                    delete_data = {"path": temp_csv_path}
+                    requests.post(delete_url, headers=headers, json=delete_data)
+                except:
+                    pass  # Ignore cleanup errors
+                
+                return table_name
+            else:
+                st.error(f"❌ Failed to create table: {sql_response.text}")
+                return None
             
     except Exception as e:
         st.error(f"❌ Error creating table: {str(e)}")
@@ -306,7 +355,7 @@ def main():
         st.header("ℹ️ How It Works")
         st.info("""
         **Process:**
-        1. Upload CSV → Create Delta Table
+        1. Upload CSV → Create Delta Table via API
         2. Pass **TABLE NAME ONLY** to Databricks
         3. Train model from table
         4. View results
