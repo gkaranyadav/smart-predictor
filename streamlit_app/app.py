@@ -72,21 +72,38 @@ def debug_prediction_files(session_id):
     base_path = f"/FileStore/results/{session_id}"
     st.info(f"Looking in: {base_path}")
     
-    # List main directory
+    # Try to read specific files directly first
+    file_paths = [
+        f"{base_path}/predictions_direct.csv",
+        f"{base_path}/predictions_sample.csv", 
+        f"{base_path}/prediction_summary.json",
+        f"{base_path}/prediction_stats.json"
+    ]
+    
+    st.write("**Trying to read specific files:**")
+    for file_path in file_paths:
+        result = dbfs_read_file(file_path)
+        if result["status"] == "success":
+            st.success(f"✅ Found: {file_path}")
+            if file_path.endswith('.json'):
+                try:
+                    content = json.loads(result["content"])
+                    st.json(content)
+                except:
+                    st.text(result["content"][:500] + "...")
+            else:
+                st.text(f"File size: {len(result['content'])} bytes")
+        else:
+            st.error(f"❌ Not found: {file_path}")
+    
+    # Then try to list directory
+    st.write("**Trying to list directory:**")
     list_result = dbfs_list_files(base_path)
     if list_result["status"] == "success":
         files = list_result.get("files", [])
         st.write(f"Found {len(files)} files/directories:")
         for file_info in files:
-            st.write(f"- {file_info['path']} (is_dir: {file_info['is_dir']})")
-            
-            # If it's a directory, list its contents too
-            if file_info['is_dir']:
-                sub_result = dbfs_list_files(file_info['path'])
-                if sub_result["status"] == "success":
-                    sub_files = sub_result.get("files", [])
-                    for sub_file in sub_files:
-                        st.write(f"  ↳ {sub_file['path']} (size: {sub_file['file_size']})")
+            st.write(f"- {file_info['path']} (is_dir: {file_info['is_dir']}, size: {file_info.get('file_size', 0)})")
     else:
         st.error(f"Could not list directory: {list_result['message']}")
 
