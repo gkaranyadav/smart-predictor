@@ -1,4 +1,4 @@
-# app.py - COMPLETE UPDATED VERSION WITH FIXED PREDICTION LOADING
+# app.py - COMPLETE UPDATED VERSION WITH JOB OUTPUT PREDICTIONS
 import streamlit as st
 import pandas as pd
 import time
@@ -63,8 +63,56 @@ if 'available_columns' not in st.session_state:
     st.session_state.available_columns = []
 if 'predictions_data' not in st.session_state:
     st.session_state.predictions_data = None
+if 'prediction_metadata' not in st.session_state:
+    st.session_state.prediction_metadata = None
 
-# ENHANCED: Smart prediction loading with multiple fallbacks
+# NEW: Get predictions from job output
+def get_predictions_from_job_output(run_id):
+    """Get predictions directly from job output instead of files"""
+    try:
+        output_result = get_job_output(run_id)
+        
+        if output_result["status"] == "success":
+            logs = output_result.get("logs", "")
+            
+            # Look for our special markers in logs
+            if "🚀 STREAMLIT_PREDICTIONS_START" in logs:
+                start_idx = logs.find("🚀 STREAMLIT_PREDICTIONS_START") + len("🚀 STREAMLIT_PREDICTIONS_START")
+                end_idx = logs.find("🚀 STREAMLIT_PREDICTIONS_END")
+                
+                if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+                    json_str = logs[start_idx:end_idx].strip()
+                    try:
+                        predictions_data = json.loads(json_str)
+                        
+                        # Convert back to DataFrame
+                        if "sample_predictions" in predictions_data:
+                            df = pd.DataFrame(predictions_data["sample_predictions"])
+                            
+                            # Add metadata to session state
+                            st.session_state.prediction_metadata = {
+                                "total_predictions": predictions_data.get("total_predictions", 0),
+                                "prediction_stats": predictions_data.get("prediction_stats", {}),
+                                "timestamp": predictions_data.get("timestamp", "")
+                            }
+                            
+                            st.success("✅ Predictions loaded from job output!")
+                            return df
+                    except Exception as e:
+                        st.error(f"Error parsing predictions: {e}")
+                        return None
+            
+            st.warning("No predictions found in job output")
+            return None
+        else:
+            st.error(f"Failed to get job output: {output_result['message']}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error getting job output: {str(e)}")
+        return None
+
+# Enhanced debug function
 def enhanced_debug_prediction_files(session_id):
     """Enhanced debug function to find prediction files"""
     st.subheader("🔍 Enhanced File Debug")
@@ -72,9 +120,7 @@ def enhanced_debug_prediction_files(session_id):
     # Try ALL possible path formats
     base_paths = [
         f"/FileStore/results/{session_id}",
-        f"dbfs:/FileStore/results/{session_id}",
         f"/FileStore/tmp/{session_id}",
-        f"dbfs:/FileStore/tmp/{session_id}"
     ]
     
     found_files = []
@@ -126,7 +172,7 @@ def enhanced_debug_prediction_files(session_id):
         st.error("🚨 NO PREDICTION FILES FOUND IN ANY LOCATION!")
         return None
 
-# ENHANCED: Smart prediction loader
+# Smart prediction loader
 def load_predictions_smart(session_id):
     """Smart prediction loader with multiple fallbacks"""
     st.info("🔍 Searching for prediction files...")
@@ -136,10 +182,6 @@ def load_predictions_smart(session_id):
         f"/FileStore/results/{session_id}/predictions.csv",
         f"/FileStore/results/{session_id}/predictions_sample.csv",
         f"/FileStore/results/{session_id}/predictions_simple.csv",
-        f"/FileStore/results/{session_id}/predictions_dbfs.csv",
-        f"/FileStore/results/{session_id}/predictions_relative.csv",
-        f"dbfs:/FileStore/results/{session_id}/predictions.csv",
-        f"dbfs:/FileStore/results/{session_id}/predictions_sample.csv",
     ]
     
     for file_path in file_patterns:
@@ -157,7 +199,7 @@ def load_predictions_smart(session_id):
     st.warning("⚠️ Direct file access failed. Starting enhanced search...")
     return enhanced_debug_prediction_files(session_id)
 
-# ENHANCED: Display predictions
+# Display predictions
 def display_predictions(predictions_df, session_id):
     """Display predictions with download option"""
     if predictions_df is None or len(predictions_df) == 0:
@@ -169,6 +211,15 @@ def display_predictions(predictions_df, session_id):
     # Display basic info
     st.write(f"**Total Predictions:** {len(predictions_df):,} rows")
     st.write(f"**Columns:** {', '.join(predictions_df.columns.tolist())}")
+    
+    # Show metadata if available
+    if st.session_state.prediction_metadata:
+        metadata = st.session_state.prediction_metadata
+        st.info(f"📊 Full dataset: {metadata.get('total_predictions', 0):,} total predictions")
+        if 'prediction_stats' in metadata:
+            stats = metadata['prediction_stats']
+            st.write(f"**Prediction 0:** {stats.get('prediction_0', 0):,}")
+            st.write(f"**Prediction 1:** {stats.get('prediction_1', 0):,}")
     
     # Display sample predictions
     st.write("**Sample Predictions (first 10 rows):**")
@@ -185,7 +236,7 @@ def display_predictions(predictions_df, session_id):
             
         with col2:
             st.write("**Prediction Statistics:**")
-            st.write(f"Total predictions: {len(predictions_df):,}")
+            st.write(f"Sample size: {len(predictions_df):,}")
             st.write(f"Unique predictions: {predictions_df['prediction'].nunique()}")
             
             # Show accuracy if we have actual values
@@ -199,9 +250,9 @@ def display_predictions(predictions_df, session_id):
     # Download button
     csv = predictions_df.to_csv(index=False)
     st.download_button(
-        label="📥 Download Full Predictions CSV",
+        label="📥 Download Sample Predictions CSV",
         data=csv,
-        file_name=f"predictions_{session_id}.csv",
+        file_name=f"predictions_sample_{session_id}.csv",
         mime="text/csv",
         key=f"download_{session_id}"
     )
@@ -517,7 +568,7 @@ elif page == "Batch Scoring":
             if st.button("🔄 Refresh Predictions", key="refresh_predictions"):
                 st.rerun()
         
-        # ENHANCED: Add debug button
+        # Enhanced debug button
         if st.button("🔍 Enhanced File Debug"):
             predictions_df = enhanced_debug_prediction_files(st.session_state.session_id)
             if predictions_df is not None:
@@ -534,8 +585,14 @@ elif page == "Batch Scoring":
             # Try to load and display previous predictions
             st.info("🔄 Loading predictions...")
             
-            # ENHANCED: Use smart prediction loader
-            predictions_df = load_predictions_smart(st.session_state.session_id)
+            # NEW: Try job output first, then files
+            run_id = st.session_state.scoring_results.get("run_id")
+            if run_id:
+                predictions_df = get_predictions_from_job_output(run_id)
+            
+            # If job output failed, try files
+            if predictions_df is None:
+                predictions_df = load_predictions_smart(st.session_state.session_id)
             
             # Display predictions if found
             if predictions_df is not None:
@@ -559,7 +616,6 @@ elif page == "Batch Scoring":
         )
         
         if st.button("🎯 Run Batch Scoring"):
-            # Skip file existence check and proceed directly
             with st.spinner("Running batch scoring..."):
                 # Use new file if provided, otherwise use original file
                 input_dbfs_path = st.session_state.dbfs_path
@@ -589,45 +645,41 @@ elif page == "Batch Scoring":
                     })
                     
                     if result["status"] == "success":
-                        st.success(f"✅ Batch scoring completed! Run ID: {result.get('run_id', 'N/A')}")
+                        run_id = result.get('run_id')
+                        st.success(f"✅ Batch scoring completed! Run ID: {run_id}")
                         
                         # Store basic results
                         st.session_state.scoring_results = {
-                            "run_id": result.get('run_id'),
+                            "run_id": run_id,
                             "status": "success",
-                            "message": "Predictions generated successfully",
-                            "predictions_path": f"/FileStore/results/{st.session_state.session_id}/"
+                            "message": "Predictions generated successfully"
                         }
                         
                         st.subheader("🎯 Scoring Results")
                         st.success("Predictions generated successfully!")
                         
-                        # Display predictions info
-                        predictions_base_path = f"/FileStore/results/{st.session_state.session_id}"
-                        st.write(f"**Predictions saved to:** {predictions_base_path}/")
-                        st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
-                        
-                        # Wait a bit then try to load predictions
-                        st.info("⏳ Waiting for predictions to be saved...")
-                        time.sleep(5)
-                        
-                        # ENHANCED: Use smart prediction loader
-                        st.info("🔍 Loading predictions...")
-                        predictions_df = load_predictions_smart(st.session_state.session_id)
-                        
-                        if predictions_df is not None:
-                            st.session_state.predictions_data = predictions_df
-                            display_success = display_predictions(predictions_df, st.session_state.session_id)
-                            if display_success:
-                                st.balloons()
+                        # NEW: Try to get predictions from job output immediately
+                        if run_id:
+                            with st.spinner("Loading predictions from job output..."):
+                                predictions_df = get_predictions_from_job_output(run_id)
+                                
+                                if predictions_df is not None:
+                                    st.session_state.predictions_data = predictions_df
+                                    display_success = display_predictions(predictions_df, st.session_state.session_id)
+                                    
+                                    if display_success:
+                                        st.balloons()
+                                else:
+                                    st.warning("Predictions not in job output. Trying file search...")
+                                    # Fall back to file search
+                                    predictions_df = load_predictions_smart(st.session_state.session_id)
+                                    if predictions_df is not None:
+                                        st.session_state.predictions_data = predictions_df
+                                        display_predictions(predictions_df, st.session_state.session_id)
+                                    else:
+                                        st.info("💡 Predictions were generated successfully! They may appear after a short delay.")
                         else:
-                            st.warning("⏳ Predictions are being processed...")
-                            st.info("""
-                            **Next Steps:**
-                            1. Wait 30 seconds and click the **🔄 Refresh Predictions** button
-                            2. Click **🔍 Enhanced File Debug** to search all locations
-                            3. Your predictions will appear here automatically when ready
-                            """)
+                            st.info("💡 Predictions generated! Check back in a moment.")
                         
                     else:
                         st.error(f"❌ Batch scoring failed: {result['message']}")
