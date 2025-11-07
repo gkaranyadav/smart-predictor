@@ -19,7 +19,7 @@ def initialize_session_state():
     if 'run_id' not in st.session_state:
         st.session_state.run_id = None
     if 'table_name' not in st.session_state:
-        st.session_state.table_name = "diabetes_binary_imbalanced_BRFSS2015_csv"
+        st.session_state.table_name = "diabetes_data_corrected"
 
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
@@ -224,6 +224,17 @@ def show_results_section(config, run_id):
                         if "roc_auc" in metrics:
                             st.metric("ROC AUC", f"{metrics.get('roc_auc', 0):.4f}")
                         
+                        # Show dataset info
+                        st.subheader("📋 Dataset Info")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.info(f"**Table:** {results.get('data_source', 'N/A')}")
+                            st.info(f"**Model:** {results.get('model_type', 'N/A')}")
+                        with col2:
+                            if 'eda' in results:
+                                st.info(f"**Rows:** {results['eda'].get('shape', [0, 0])[0]:,}")
+                                st.info(f"**Features:** {results['eda'].get('shape', [0, 0])[1] - 1}")
+                        
                         st.success("🎉 Model training completed successfully!")
             except Exception as e:
                 st.info("📊 Check Databricks MLflow for detailed metrics")
@@ -238,7 +249,7 @@ def main():
     initialize_session_state()
     
     st.title("🚀 Databricks ML Pipeline")
-    st.markdown("Train ML models using your existing Delta Table!")
+    st.markdown("Train ML models on Diabetes Prediction Dataset!")
     
     # Check configurations
     databricks_config = get_databricks_config()
@@ -270,39 +281,50 @@ def main():
         st.write(f"**Tuning:** {'Yes' if enable_tuning else 'No'}")
         
         st.markdown("---")
+        st.header("📈 Dataset Info")
+        st.info("""
+        **Diabetes Prediction Dataset:**
+        - **Target:** Diabetes_binary (0.0 = No, 1.0 = Yes)
+        - **Samples:** 253,681
+        - **Features:** 21 health indicators
+        - **Classes:** 0.0 (86%), 1.0 (14%)
+        """)
+        
+        st.markdown("---")
         st.header("ℹ️ How It Works")
         st.info("""
         **Process:**
         1. Configure ML settings
-        2. Start pipeline with table: `diabetes_binary_imbalanced_BRFSS2015_csv`
-        3. Databricks trains model on the table data
-        4. View results
+        2. Start pipeline with diabetes dataset
+        3. Databricks trains model on health data
+        4. View prediction results
         
-        **Benefits:**
-        - ✅ No file upload needed
-        - ✅ Fast table access
-        - ✅ Professional workflow
-        - ✅ Reliable & scalable
+        **Features:**
+        - HighBP, HighChol, BMI, Smoker
+        - Stroke, HeartDisease, PhysActivity
+        - Fruits, Veggies, AlcoholConsump
         """)
     
     # Main area
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.header("📋 Dataset Info")
+        st.header("📋 Dataset Preview")
         st.info(f"""
         **Using Table:** `{st.session_state.table_name}`
         
-        **Location:** `hive_metastore.default.{st.session_state.table_name}`
+        **Target Variable:** `Diabetes_binary`
+        - **0.0**: No Diabetes (218,334 samples)
+        - **1.0**: Has Diabetes (35,346 samples)
         
-        **To change dataset:**
-        1. Upload new CSV via Databricks UI
-        2. Create new table using "Create Table in Notebook"
-        3. Update the table name in this app
+        **Health Indicators:**
+        - HighBP, HighChol, CholCheck, BMI
+        - Smoker, Stroke, HeartDiseaseorAttack
+        - PhysActivity, Fruits, Veggies, HvyAlcoholConsump
         """)
         
-        # Optional: Show table preview
-        if st.button("🔍 Preview Table Data", use_container_width=True):
+        # Show table preview
+        if st.button("🔍 Preview Data", use_container_width=True):
             try:
                 config = get_databricks_config()
                 if config:
@@ -311,7 +333,12 @@ def main():
                     headers = {"Authorization": f"Bearer {config['token']}"}
                     
                     sql_data = {
-                        "statement": f"SELECT * FROM hive_metastore.default.{st.session_state.table_name} LIMIT 5",
+                        "statement": f"""
+                        SELECT Diabetes_binary, HighBP, HighChol, BMI, Smoker, 
+                               Stroke, HeartDiseaseorAttack, PhysActivity
+                        FROM hive_metastore.default.{st.session_state.table_name} 
+                        LIMIT 8
+                        """,
                         "warehouse_id": "auto"
                     }
                     
@@ -323,7 +350,6 @@ def main():
                             columns = [col['name'] for col in result['result']['manifest']['schema']['columns']]
                             preview_df = pd.DataFrame(data, columns=columns)
                             st.dataframe(preview_df)
-                            st.write(f"📏 **Total Rows:** Use `SELECT COUNT(*) FROM hive_metastore.default.{st.session_state.table_name}`")
             except Exception as e:
                 st.error(f"Could not fetch preview: {e}")
     
@@ -331,17 +357,20 @@ def main():
         st.header("🚀 Run ML Pipeline")
         
         st.write("**Pipeline Configuration:**")
-        st.write(f"- **Data Source:** `{st.session_state.table_name}`")
+        st.write(f"- **Dataset:** Diabetes Prediction")
+        st.write(f"- **Samples:** 253,681 patients")
+        st.write(f"- **Target:** Diabetes Detection")
         st.write(f"- **Model:** {selected_model}")
         st.write(f"- **Test Size:** {test_size}%")
-        st.write(f"- **Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
+        st.write(f"- **Tuning:** {'Yes' if enable_tuning else 'No'}")
         
-        if st.button("🎯 Start ML Pipeline", type="primary", use_container_width=True):
+        if st.button("🎯 Start Diabetes Prediction Pipeline", type="primary", use_container_width=True):
             run_pipeline(st.session_state.table_name, selected_model, enable_tuning, test_size)
         
         # Show status
         if st.session_state.job_status == 'running':
             st.info("🔄 Pipeline is running...")
+            st.info("💡 Training model on diabetes dataset...")
         elif st.session_state.job_status == 'completed':
             st.success("✅ Pipeline completed!")
         elif st.session_state.job_status == 'failed':
