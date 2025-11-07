@@ -311,7 +311,7 @@ def dbfs_read_file(dbfs_path):
         payload = {
             "path": dbfs_path,
             "offset": 0,
-            "length": 1000000  # Read up to 1MB
+            "length": 5000000  # Read up to 5MB
         }
         
         response = requests.post(url, json=payload, headers=HEADERS)
@@ -326,7 +326,6 @@ def dbfs_read_file(dbfs_path):
                 return {"status": "error", "message": "File is empty or doesn't exist"}
         else:
             return {"status": "error", "message": f"Failed to read file: {response.text}"}
-            
     except Exception as e:
         return {"status": "error", "message": f"Error reading file: {str(e)}"}
 
@@ -351,24 +350,38 @@ def dbfs_file_exists(dbfs_path):
         return False
 
 # -------------------------------
-# 8️⃣ List files in DBFS directory
+# 8️⃣ List files in DBFS directory - FIXED VERSION
 # -------------------------------
 def dbfs_list_files(directory_path):
     """
-    List files in a DBFS directory
+    List files in a DBFS directory - USING CORRECT API
     """
     try:
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
             
-        url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs/list"
-        payload = {"path": directory_path}
+        # Use the correct API endpoint for workspace/files
+        url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/workspace/list"
+        payload = {
+            "path": directory_path
+        }
         
-        response = requests.post(url, json=payload, headers=HEADERS)
+        response = requests.get(url, headers=HEADERS, json=payload)
         
         if response.status_code == 200:
             data = response.json()
-            return {"status": "success", "files": data.get("files", [])}
+            files = data.get("objects", [])
+            
+            # Convert to the expected format
+            formatted_files = []
+            for file_info in files:
+                formatted_files.append({
+                    "path": file_info["path"],
+                    "is_dir": file_info["object_type"] == "DIRECTORY",
+                    "file_size": file_info.get("size", 0)
+                })
+            
+            return {"status": "success", "files": formatted_files}
         else:
             return {"status": "error", "message": f"Failed to list directory: {response.text}"}
             
