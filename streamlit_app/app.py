@@ -3,8 +3,7 @@ import pandas as pd
 import requests
 import json
 import time
-import os
-from datetime import datetime
+import base64
 
 # Page configuration
 st.set_page_config(
@@ -26,12 +25,167 @@ def get_databricks_config():
     """Get Databricks configuration from secrets"""
     try:
         return {
-            'host': st.secrets["DATABRICKS"]["HOST"],
+            'host': st.secrets["DATABRICKS"]["HOST"].rstrip('/'),
             'token': st.secrets["DATABRICKS"]["TOKEN"]
         }
     except Exception as e:
         st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
+
+def upload_file_to_dbfs(file_content, file_name, config):
+    """Upload file to DBFS using Databricks API"""
+    try:
+        # Encode file content
+        encoded_content = base64.b64encode(file_content).decode()
+        
+        # DBFS API endpoint
+        url = f"{config['host']}/api/2.0/dbfs/put"
+        
+        headers = {
+            "Authorization": f"Bearer {config['token']}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "path": f"/FileStore/uploads/{file_name}",
+            "contents": encoded_content,
+            "overwrite": True
+        }
+        
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            return f"dbfs:/FileStore/uploads/{file_name}"
+        else:
+            st.error(f"File upload failed: {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error uploading file: {e}")
+        return None
+
+def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_size):
+    """Trigger Databricks job via API"""
+    try:
+        url = f"{config['host']}/api/2.0/jobs/run-now"
+        
+        headers = {
+            "Authorization": f"Bearer {config['token']}",
+            "Content-Type": "application/json"
+        }
+        
+        # Job parameters
+        data = {
+            "job_id": 123456,  # We'll set this after creating the job
+            "notebook_params": {
+                "input_path": file_path,
+                "output_path": "/FileStore/results",
+                "model_type": model_type,
+                "enable_tuning": str(enable_tuning).lower(),
+                "test_size": str(test_size)
+            }
+        }
+        
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            return response.json()["run_id"]
+        else:
+            st.error(f"Job trigger failed: {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"Error triggering job: {e}")
+        return None
+
+def get_job_status(config, run_id):
+    """Get job status"""
+    try:
+        url = f"{config['host']}/api/2.0/jobs/runs/get?run_id={run_id}"
+        
+        headers = {
+            "Authorization": f"Bearer {config['token']}"
+        }
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            return response.json()["state"]["life_cycle_state"]
+        else:
+            return "UNKNOWN"
+            
+    except Exception as e:
+        return "ERROR"
+
+def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
+    """Trigger the Databricks pipeline"""
+    try:
+        config = get_databricks_config()
+        if not config:
+            return
+        
+        # Show progress
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Step 1: Upload file
+        status_text.info("📤 Uploading file to Databricks...")
+        file_content = uploaded_file.getvalue()
+        file_path = upload_file_to_dbfs(file_content, uploaded_file.name, config)
+        progress_bar.progress(25)
+        
+        if not file_path:
+            return
+        
+        # Step 2: Trigger job
+        status_text.info("🚀 Starting ML pipeline on Databricks...")
+        
+        # Map model names to internal codes
+        model_mapping = {
+            "Logistic Regression": "logistic",
+            "Random Forest": "random_forest", 
+            "XGBoost": "xgboost",
+            "LightGBM": "lightgbm",
+            "Neural Network": "neural_net"
+        }
+        
+        model_code = model_mapping[model_name]
+        run_id = trigger_databricks_job(config, file_path, model_code, enable_tuning, test_size)
+        progress_bar.progress(50)
+        
+        if not run_id:
+            return
+        
+        # Store in session state
+        st.session_state.job_id = run_id
+        st.session_state.job_status = 'running'
+        
+        # Step 3: Poll for completion
+        status_text.info("🔄 Pipeline running... This may take a few minutes.")
+        
+        max_attempts = 60  # 5 minutes max
+        for attempt in range(max_attempts):
+            status = get_job_status(config, run_id)
+            
+            if status in ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"]:
+                break
+                
+            progress = 50 + (attempt / max_attempts) * 45
+            progress_bar.progress(min(progress, 95))
+            time.sleep(5)  # Wait 5 seconds between checks
+        
+        progress_bar.progress(100)
+        
+        if status == "TERMINATED":
+            status_text.success("✅ Pipeline completed successfully!")
+            st.session_state.job_status = 'completed'
+        else:
+            status_text.error(f"❌ Pipeline ended with status: {status}")
+            st.session_state.job_status = 'failed'
+        
+    except Exception as e:
+        st.error(f"❌ Error in pipeline: {e}")
+        st.session_state.job_status = 'failed'
 
 def main():
     initialize_session_state()
@@ -103,39 +257,16 @@ def main():
             if st.button("🎯 Run ML Pipeline", type="primary", use_container_width=True):
                 run_pipeline(uploaded_file, selected_model, enable_tuning, test_size)
             
-            # Show status if job is running
+            # Show status
             if st.session_state.job_status == 'running':
-                with st.container():
-                    st.info("🔄 Pipeline is running on Databricks...")
-                    progress_bar = st.progress(0)
-                    
-                    # Simulate progress (we'll replace with actual polling)
-                    for i in range(100):
-                        time.sleep(0.1)
-                        progress_bar.progress(i + 1)
-                    
-                    st.success("✅ Pipeline completed!")
+                st.info("🔄 Pipeline is running on Databricks...")
+            elif st.session_state.job_status == 'completed':
+                st.success("✅ Pipeline completed! Check Databricks for results.")
+            elif st.session_state.job_status == 'failed':
+                st.error("❌ Pipeline failed. Check Databricks logs for details.")
         
         else:
             st.info("Please upload a CSV file to start the pipeline")
-
-def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
-    """Trigger the Databricks pipeline"""
-    try:
-        config = get_databricks_config()
-        if not config:
-            return
-        
-        # For now, just show a message
-        st.session_state.job_status = 'running'
-        st.info(f"🚀 Starting pipeline with {model_name}...")
-        
-        # TODO: Implement Databricks API calls
-        st.warning("Databricks integration will be implemented in next step")
-        
-    except Exception as e:
-        st.error(f"❌ Error starting pipeline: {e}")
-        st.session_state.job_status = 'failed'
 
 if __name__ == "__main__":
     main()
