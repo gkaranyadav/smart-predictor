@@ -229,7 +229,7 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
             if status in ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"]:
                 break
                 
-            progress = 75 + (attempt / max_attempts) * 20
+            progress = 0.75 + (attempt / max_attempts) *0.20
             progress_bar.progress(min(progress, 95))
             time.sleep(5)  # Wait 5 seconds between checks
         
