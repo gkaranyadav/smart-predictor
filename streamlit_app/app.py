@@ -17,9 +17,12 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------
 # 1️⃣ Databricks Config — Replace with your details
 # ---------------------------------------------------------------
-DATABRICKS_HOST = "https://dbc-484c2988-d6e6.cloud.databricks.com"  # your workspace URL
-DATABRICKS_TOKEN = "dapiYOUR_TOKEN_HERE"  # generate fresh token
-INGEST_TO_DELTA_JOB_ID = 1234  # replace with your actual job ID
+
+DATABRICKS_HOST = st.secrets["DATABRICKS_HOST"]
+DATABRICKS_TOKEN = st.secrets["DATABRICKS_TOKEN"]
+DATABRICKS_JOB_INGEST_ID = st.secrets["DATABRICKS_JOB_INGEST_ID"]
+DATABRICKS_JOB_TRAIN_ID = st.secrets["DATABRICKS_JOB_TRAIN_ID"]
+DATABRICKS_JOB_SCORE_ID = st.secrets["DATABRICKS_JOB_SCORE_ID"]
 
 # ---------------------------------------------------------------
 # 2️⃣ Helper Functions
