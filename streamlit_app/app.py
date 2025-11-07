@@ -18,8 +18,8 @@ def initialize_session_state():
         st.session_state.job_status = 'not_started'
     if 'run_id' not in st.session_state:
         st.session_state.run_id = None
-    if 'uploaded_file' not in st.session_state:
-        st.session_state.uploaded_file = None
+    if 'table_name' not in st.session_state:
+        st.session_state.table_name = "diabetes_binary_imbalanced_BRFSS2015_csv"
 
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
@@ -34,8 +34,8 @@ def get_databricks_config():
         st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
 
-def trigger_databricks_job(config, model_type, enable_tuning, test_size):
-    """Trigger Databricks job via API - NO FILE UPLOAD NEEDED!"""
+def trigger_databricks_job(config, table_name, model_type, enable_tuning, test_size):
+    """Trigger Databricks job via API"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
         
@@ -44,10 +44,11 @@ def trigger_databricks_job(config, model_type, enable_tuning, test_size):
             "Content-Type": "application/json"
         }
         
-        # Job parameters - Databricks notebook handles file upload internally
+        # Job parameters
         data = {
             "job_id": int(config['job_id']),
             "notebook_params": {
+                "table_name": table_name,
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
                 "test_size": str(test_size),
@@ -101,7 +102,7 @@ def get_job_status(config, run_id):
             "state_message": str(e)
         }
 
-def run_pipeline(model_name, enable_tuning, test_size):
+def run_pipeline(table_name, model_name, enable_tuning, test_size):
     """Trigger the Databricks pipeline"""
     try:
         config = get_databricks_config()
@@ -124,7 +125,7 @@ def run_pipeline(model_name, enable_tuning, test_size):
         
         # Step 1: Trigger job
         status_text.info("🚀 Starting ML pipeline on Databricks...")
-        run_id = trigger_databricks_job(config, model_code, enable_tuning, test_size)
+        run_id = trigger_databricks_job(config, table_name, model_code, enable_tuning, test_size)
         progress_bar.progress(30)
         
         if not run_id:
@@ -237,13 +238,7 @@ def main():
     initialize_session_state()
     
     st.title("🚀 Databricks ML Pipeline")
-    st.markdown("""
-    ### New Workflow:
-    1. **Configure settings** in this Streamlit app
-    2. **Click "Start ML Pipeline"** 
-    3. **Upload your CSV file** directly in Databricks UI
-    4. **View results** here when complete
-    """)
+    st.markdown("Train ML models using your existing Delta Table!")
     
     # Check configurations
     databricks_config = get_databricks_config()
@@ -269,7 +264,7 @@ def main():
         
         st.markdown("---")
         st.header("📊 Current Setup")
-        st.success("✅ File upload handled in Databricks!")
+        st.success(f"✅ Using Table: **{st.session_state.table_name}**")
         st.write(f"**Model:** {selected_model}")
         st.write(f"**Test Size:** {test_size}%")
         st.write(f"**Tuning:** {'Yes' if enable_tuning else 'No'}")
@@ -277,77 +272,76 @@ def main():
         st.markdown("---")
         st.header("ℹ️ How It Works")
         st.info("""
-        **New Process:**
-        1. Configure settings here
-        2. Start pipeline → Opens Databricks
-        3. Upload CSV in Databricks UI
-        4. Pipeline runs automatically
-        5. View results back here
+        **Process:**
+        1. Configure ML settings
+        2. Start pipeline with table: `diabetes_binary_imbalanced_BRFSS2015_csv`
+        3. Databricks trains model on the table data
+        4. View results
         
         **Benefits:**
-        - ✅ No file size limits
-        - ✅ Native Databricks file upload
-        - ✅ Simple and reliable
+        - ✅ No file upload needed
+        - ✅ Fast table access
         - ✅ Professional workflow
+        - ✅ Reliable & scalable
         """)
     
     # Main area
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.header("📋 Pipeline Info")
-        st.info("""
-        **Important Note:**
-        - File upload now happens **directly in Databricks**
-        - No file size limits!
-        - More reliable and professional
+        st.header("📋 Dataset Info")
+        st.info(f"""
+        **Using Table:** `{st.session_state.table_name}`
         
-        **When you start the pipeline:**
-        1. Databricks job will start
-        2. You'll see file upload UI in Databricks
-        3. Upload your CSV file there
-        4. Pipeline continues automatically
+        **Location:** `hive_metastore.default.{st.session_state.table_name}`
+        
+        **To change dataset:**
+        1. Upload new CSV via Databricks UI
+        2. Create new table using "Create Table in Notebook"
+        3. Update the table name in this app
         """)
         
-        # Optional: Still show file preview if user wants
-        uploaded_file = st.file_uploader(
-            "Optional: Preview CSV (not uploaded)", 
-            type=['csv'],
-            help="This is just for preview - actual upload happens in Databricks"
-        )
-        
-        if uploaded_file is not None:
+        # Optional: Show table preview
+        if st.button("🔍 Preview Table Data", use_container_width=True):
             try:
-                df_preview = pd.read_csv(uploaded_file, nrows=5)
-                st.subheader("Data Preview")
-                st.dataframe(df_preview)
-                st.write(f"📏 **Shape:** {df_preview.shape}")
+                config = get_databricks_config()
+                if config:
+                    # Execute SQL to get table preview
+                    sql_url = f"{config['host']}/api/2.0/sql/statements"
+                    headers = {"Authorization": f"Bearer {config['token']}"}
+                    
+                    sql_data = {
+                        "statement": f"SELECT * FROM hive_metastore.default.{st.session_state.table_name} LIMIT 5",
+                        "warehouse_id": "auto"
+                    }
+                    
+                    response = requests.post(sql_url, headers=headers, json=sql_data)
+                    if response.status_code == 200:
+                        result = response.json()
+                        if 'result' in result and 'data_array' in result['result']:
+                            data = result['result']['data_array']
+                            columns = [col['name'] for col in result['result']['manifest']['schema']['columns']]
+                            preview_df = pd.DataFrame(data, columns=columns)
+                            st.dataframe(preview_df)
+                            st.write(f"📏 **Total Rows:** Use `SELECT COUNT(*) FROM hive_metastore.default.{st.session_state.table_name}`")
             except Exception as e:
-                st.error(f"Error reading file: {e}")
+                st.error(f"Could not fetch preview: {e}")
     
     with col2:
-        st.header("🚀 Start ML Pipeline")
-        
-        st.warning("""
-        ⚠️ **Before starting:**
-        - Make sure your Databricks job is configured
-        - The notebook should have file upload widget
-        - You'll upload the file in Databricks UI
-        """)
+        st.header("🚀 Run ML Pipeline")
         
         st.write("**Pipeline Configuration:**")
+        st.write(f"- **Data Source:** `{st.session_state.table_name}`")
         st.write(f"- **Model:** {selected_model}")
         st.write(f"- **Test Size:** {test_size}%")
         st.write(f"- **Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
-        st.write(f"- **File Upload:** In Databricks UI")
         
         if st.button("🎯 Start ML Pipeline", type="primary", use_container_width=True):
-            run_pipeline(selected_model, enable_tuning, test_size)
+            run_pipeline(st.session_state.table_name, selected_model, enable_tuning, test_size)
         
         # Show status
         if st.session_state.job_status == 'running':
             st.info("🔄 Pipeline is running...")
-            st.info("💡 Check Databricks workspace to upload your file!")
         elif st.session_state.job_status == 'completed':
             st.success("✅ Pipeline completed!")
         elif st.session_state.job_status == 'failed':
