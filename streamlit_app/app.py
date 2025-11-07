@@ -1,4 +1,4 @@
-# app.py - COMPLETE UPDATED VERSION WITH TASK OUTPUT PREDICTIONS
+# app.py - COMPLETE UPDATED VERSION WITH FIXED PARSING
 import streamlit as st
 import pandas as pd
 import time
@@ -75,10 +75,10 @@ def get_predictions_from_job_output(run_id):
         if output_result["status"] == "success":
             logs = output_result.get("logs", "")
             
-            # Look for our special markers in logs
-            if "🚀 STREAMLIT_PREDICTIONS_START" in logs:
-                start_idx = logs.find("🚀 STREAMLIT_PREDICTIONS_START") + len("🚀 STREAMLIT_PREDICTIONS_START")
-                end_idx = logs.find("🚀 STREAMLIT_PREDICTIONS_END")
+            # ✅ FIXED: Look for our markers
+            if "=== STREAMLIT_PREDICTIONS ===" in logs:
+                start_idx = logs.find("=== STREAMLIT_PREDICTIONS ===") + len("=== STREAMLIT_PREDICTIONS ===")
+                end_idx = logs.find("=== END_STREAMLIT_PREDICTIONS ===")
                 
                 if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
                     json_str = logs[start_idx:end_idx].strip()
@@ -104,7 +104,15 @@ def get_predictions_from_job_output(run_id):
                         st.error(f"Error parsing predictions: {e}")
                         return None
             
+            # Debug: Show what we actually got
             st.warning("No predictions found in task output")
+            st.info(f"Debug - Logs length: {len(logs)}")
+            if len(logs) > 0:
+                # Show last part of logs to see what markers are there
+                last_1000 = logs[-1000:]
+                st.text_area("Last 1000 chars of logs:", last_1000, height=200)
+                if "STREAMLIT" in last_1000:
+                    st.info("Found STREAMLIT marker in logs!")
             return None
         else:
             st.error(f"Failed to get task output: {output_result['message']}")
@@ -184,6 +192,7 @@ def load_predictions_smart(session_id):
         f"/FileStore/results/{session_id}/predictions.csv",
         f"/FileStore/results/{session_id}/predictions_sample.csv",
         f"/FileStore/results/{session_id}/predictions_direct.csv",
+        f"/FileStore/tmp/{session_id}/predictions.csv",
     ]
     
     for file_path in file_patterns:
