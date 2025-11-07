@@ -3,7 +3,6 @@ import pandas as pd
 import requests
 import json
 import time
-import base64
 from io import BytesIO
 
 # Page configuration
@@ -19,8 +18,6 @@ def initialize_session_state():
         st.session_state.job_status = 'not_started'
     if 'run_id' not in st.session_state:
         st.session_state.run_id = None
-    if 'table_name' not in st.session_state:
-        st.session_state.table_name = None
     if 'uploaded_file' not in st.session_state:
         st.session_state.uploaded_file = None
 
@@ -37,87 +34,8 @@ def get_databricks_config():
         st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
 
-def create_table_from_csv(uploaded_file, config):
-    """Upload CSV and create temporary table using Databricks API"""
-    try:
-        # Generate unique table name
-        timestamp = int(time.time())
-        table_name = f"ml_pipeline_data_{timestamp}"
-        
-        with st.spinner(f"📊 Creating table {table_name} in Databricks..."):
-            # Read CSV file
-            uploaded_file.seek(0)
-            df = pd.read_csv(uploaded_file)
-            
-            # Step 1: Upload CSV to DBFS first
-            temp_csv_path = f"/FileStore/temp_{timestamp}_{uploaded_file.name}"
-            
-            # Convert DataFrame to CSV string
-            csv_content = df.to_csv(index=False)
-            
-            # Upload CSV to DBFS using API
-            upload_url = f"{config['host']}/api/2.0/dbfs/put"
-            headers = {
-                "Authorization": f"Bearer {config['token']}",
-                "Content-Type": "application/json"
-            }
-            
-            upload_data = {
-                "path": temp_csv_path,
-                "contents": base64.b64encode(csv_content.encode('utf-8')).decode('utf-8'),
-                "overwrite": True
-            }
-            
-            upload_response = requests.post(upload_url, headers=headers, json=upload_data)
-            
-            if upload_response.status_code != 200:
-                st.error(f"❌ Failed to upload CSV to DBFS: {upload_response.text}")
-                return None
-            
-            # Step 2: Create table from CSV using Databricks SQL API
-            create_table_sql = f"""
-            CREATE OR REPLACE TABLE hive_metastore.default.{table_name}
-            USING CSV
-            OPTIONS (
-                path "dbfs:{temp_csv_path}",
-                header "true",
-                inferSchema "true"
-            )
-            """
-            
-            # Execute SQL using Databricks API
-            sql_url = f"{config['host']}/api/2.0/sql/statements"
-            sql_data = {
-                "statement": create_table_sql,
-                "warehouse_id": "auto"  # Use auto-detected warehouse
-            }
-            
-            sql_response = requests.post(sql_url, headers=headers, json=sql_data)
-            
-            if sql_response.status_code == 200:
-                st.success(f"✅ Table created successfully: {table_name}")
-                st.info(f"**Table Location:** `hive_metastore.default.{table_name}`")
-                st.info(f"**Data Shape:** {df.shape} | **Size:** {len(uploaded_file.getvalue()) / (1024*1024):.2f} MB")
-                
-                # Clean up temporary CSV file
-                try:
-                    delete_url = f"{config['host']}/api/2.0/dbfs/delete"
-                    delete_data = {"path": temp_csv_path}
-                    requests.post(delete_url, headers=headers, json=delete_data)
-                except:
-                    pass  # Ignore cleanup errors
-                
-                return table_name
-            else:
-                st.error(f"❌ Failed to create table: {sql_response.text}")
-                return None
-            
-    except Exception as e:
-        st.error(f"❌ Error creating table: {str(e)}")
-        return None
-
-def trigger_databricks_job(config, table_name, model_type, enable_tuning, test_size):
-    """Trigger Databricks job via API - PASSING TABLE NAME ONLY"""
+def trigger_databricks_job(config, model_type, enable_tuning, test_size):
+    """Trigger Databricks job via API - NO FILE UPLOAD NEEDED!"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
         
@@ -126,11 +44,10 @@ def trigger_databricks_job(config, table_name, model_type, enable_tuning, test_s
             "Content-Type": "application/json"
         }
         
-        # Job parameters - ONLY TABLE NAME, NO FILE PATHS
+        # Job parameters - Databricks notebook handles file upload internally
         data = {
             "job_id": int(config['job_id']),
             "notebook_params": {
-                "table_name": table_name,  # ONLY THIS - NO PATHS!
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
                 "test_size": str(test_size),
@@ -184,7 +101,7 @@ def get_job_status(config, run_id):
             "state_message": str(e)
         }
 
-def run_pipeline(table_name, model_name, enable_tuning, test_size):
+def run_pipeline(model_name, enable_tuning, test_size):
     """Trigger the Databricks pipeline"""
     try:
         config = get_databricks_config()
@@ -207,7 +124,7 @@ def run_pipeline(table_name, model_name, enable_tuning, test_size):
         
         # Step 1: Trigger job
         status_text.info("🚀 Starting ML pipeline on Databricks...")
-        run_id = trigger_databricks_job(config, table_name, model_code, enable_tuning, test_size)
+        run_id = trigger_databricks_job(config, model_code, enable_tuning, test_size)
         progress_bar.progress(30)
         
         if not run_id:
@@ -320,7 +237,13 @@ def main():
     initialize_session_state()
     
     st.title("🚀 Databricks ML Pipeline")
-    st.markdown("Upload your dataset and train ML models using **Delta Tables** - **NO FILE PATHS**!")
+    st.markdown("""
+    ### New Workflow:
+    1. **Configure settings** in this Streamlit app
+    2. **Click "Start ML Pipeline"** 
+    3. **Upload your CSV file** directly in Databricks UI
+    4. **View results** here when complete
+    """)
     
     # Check configurations
     databricks_config = get_databricks_config()
@@ -346,7 +269,7 @@ def main():
         
         st.markdown("---")
         st.header("📊 Current Setup")
-        st.success("✅ Using Delta Tables - **No File Paths!**")
+        st.success("✅ File upload handled in Databricks!")
         st.write(f"**Model:** {selected_model}")
         st.write(f"**Test Size:** {test_size}%")
         st.write(f"**Tuning:** {'Yes' if enable_tuning else 'No'}")
@@ -354,90 +277,81 @@ def main():
         st.markdown("---")
         st.header("ℹ️ How It Works")
         st.info("""
-        **Process:**
-        1. Upload CSV → Create Delta Table via API
-        2. Pass **TABLE NAME ONLY** to Databricks
-        3. Train model from table
-        4. View results
+        **New Process:**
+        1. Configure settings here
+        2. Start pipeline → Opens Databricks
+        3. Upload CSV in Databricks UI
+        4. Pipeline runs automatically
+        5. View results back here
         
         **Benefits:**
-        - ✅ No file path errors
-        - ✅ No size limits  
-        - ✅ No permissions issues
-        - ✅ Reliable & trackable
+        - ✅ No file size limits
+        - ✅ Native Databricks file upload
+        - ✅ Simple and reliable
+        - ✅ Professional workflow
         """)
     
     # Main area
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.header("📁 Upload Dataset")
+        st.header("📋 Pipeline Info")
+        st.info("""
+        **Important Note:**
+        - File upload now happens **directly in Databricks**
+        - No file size limits!
+        - More reliable and professional
         
+        **When you start the pipeline:**
+        1. Databricks job will start
+        2. You'll see file upload UI in Databricks
+        3. Upload your CSV file there
+        4. Pipeline continues automatically
+        """)
+        
+        # Optional: Still show file preview if user wants
         uploaded_file = st.file_uploader(
-            "Choose a CSV file", 
+            "Optional: Preview CSV (not uploaded)", 
             type=['csv'],
-            help="Select your dataset file (any size supported!)"
+            help="This is just for preview - actual upload happens in Databricks"
         )
         
         if uploaded_file is not None:
-            # Store file in session state
-            st.session_state.uploaded_file = uploaded_file
-            
-            # Preview data
             try:
                 df_preview = pd.read_csv(uploaded_file, nrows=5)
                 st.subheader("Data Preview")
                 st.dataframe(df_preview)
-                
-                st.subheader("Dataset Info")
                 st.write(f"📏 **Shape:** {df_preview.shape}")
-                file_size = len(uploaded_file.getvalue()) / (1024*1024)
-                st.write(f"📊 **File Size:** {file_size:.2f} MB")
-                st.write(f"🎯 **Columns:** {len(df_preview.columns)}")
-                st.write(f"🔍 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:3])}...")
-                
-                # Create table in Databricks
-                if not st.session_state.table_name:
-                    if st.button("📊 Create Delta Table", type="primary", use_container_width=True):
-                        table_name = create_table_from_csv(uploaded_file, databricks_config)
-                        if table_name:
-                            st.session_state.table_name = table_name
-                            st.rerun()
-                
             except Exception as e:
                 st.error(f"Error reading file: {e}")
-        else:
-            st.info("👆 Please upload a CSV file to begin")
     
     with col2:
-        st.header("🚀 Run ML Pipeline")
+        st.header("🚀 Start ML Pipeline")
         
-        if st.session_state.table_name:
-            st.success("✅ Delta Table created successfully!")
-            st.info(f"**Table Name:** `{st.session_state.table_name}`")
-            st.info("📍 **Location:** `hive_metastore.default`")
-            
-            st.write("**Pipeline Configuration:**")
-            st.write(f"- **Model:** {selected_model}")
-            st.write(f"- **Test Size:** {test_size}%")
-            st.write(f"- **Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
-            st.write(f"- **Data Source:** Delta Table")
-            
-            if st.button("🎯 Start ML Pipeline", type="primary", use_container_width=True):
-                run_pipeline(st.session_state.table_name, selected_model, enable_tuning, test_size)
-            
-            # Show status
-            if st.session_state.job_status == 'running':
-                st.info("🔄 Pipeline is running...")
-            elif st.session_state.job_status == 'completed':
-                st.success("✅ Pipeline completed!")
-            elif st.session_state.job_status == 'failed':
-                st.error("❌ Pipeline failed.")
+        st.warning("""
+        ⚠️ **Before starting:**
+        - Make sure your Databricks job is configured
+        - The notebook should have file upload widget
+        - You'll upload the file in Databricks UI
+        """)
         
-        elif st.session_state.uploaded_file is not None:
-            st.info("👆 Click 'Create Delta Table' to proceed")
-        else:
-            st.info("📁 Please upload a CSV file to begin")
+        st.write("**Pipeline Configuration:**")
+        st.write(f"- **Model:** {selected_model}")
+        st.write(f"- **Test Size:** {test_size}%")
+        st.write(f"- **Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
+        st.write(f"- **File Upload:** In Databricks UI")
+        
+        if st.button("🎯 Start ML Pipeline", type="primary", use_container_width=True):
+            run_pipeline(selected_model, enable_tuning, test_size)
+        
+        # Show status
+        if st.session_state.job_status == 'running':
+            st.info("🔄 Pipeline is running...")
+            st.info("💡 Check Databricks workspace to upload your file!")
+        elif st.session_state.job_status == 'completed':
+            st.success("✅ Pipeline completed!")
+        elif st.session_state.job_status == 'failed':
+            st.error("❌ Pipeline failed.")
 
 if __name__ == "__main__":
     main()
