@@ -1,4 +1,4 @@
-# app.py
+# app.py - COMPLETE UPDATED VERSION
 import streamlit as st
 import pandas as pd
 import time
@@ -64,9 +64,35 @@ if 'available_columns' not in st.session_state:
 if 'predictions_data' not in st.session_state:
     st.session_state.predictions_data = None
 
-# Helper functions for prediction handling
+# NEW: Debug function for prediction files
+def debug_prediction_files(session_id):
+    """Debug function to see what files actually exist"""
+    st.subheader("🐛 Debug File Search")
+    
+    base_path = f"/FileStore/results/{session_id}"
+    st.info(f"Looking in: {base_path}")
+    
+    # List main directory
+    list_result = dbfs_list_files(base_path)
+    if list_result["status"] == "success":
+        files = list_result.get("files", [])
+        st.write(f"Found {len(files)} files/directories:")
+        for file_info in files:
+            st.write(f"- {file_info['path']} (is_dir: {file_info['is_dir']})")
+            
+            # If it's a directory, list its contents too
+            if file_info['is_dir']:
+                sub_result = dbfs_list_files(file_info['path'])
+                if sub_result["status"] == "success":
+                    sub_files = sub_result.get("files", [])
+                    for sub_file in sub_files:
+                        st.write(f"  ↳ {sub_file['path']} (size: {sub_file['file_size']})")
+    else:
+        st.error(f"Could not list directory: {list_result['message']}")
+
+# NEW: Smart prediction loading functions
 def load_predictions_from_directory(directory_path):
-    """Load predictions from Spark output directory by combining all part files"""
+    """Load predictions from Spark output directory"""
     try:
         # List all files in the directory
         files_result = dbfs_list_files(directory_path)
@@ -76,47 +102,56 @@ def load_predictions_from_directory(directory_path):
         files = files_result.get("files", [])
         if not files:
             return None
-            
-        # Find all CSV part files
-        csv_files = [f for f in files if f["path"].endswith(".csv") and "part-" in f["path"]]
-        if not csv_files:
-            return None
-            
-        # Read and combine all part files
-        all_data = []
-        for file_info in csv_files:
-            file_path = file_info["path"]
-            file_result = dbfs_read_file(file_path)
-            if file_result["status"] == "success":
+        
+        # Try different file patterns
+        file_patterns = [
+            f"{directory_path}/predictions_direct.csv",  # Direct CSV
+            f"{directory_path}/predictions_sample.csv",  # Sample CSV
+        ]
+        
+        # Also look for Spark part files
+        for file_info in files:
+            if "part-" in file_info["path"] and file_info["path"].endswith(".csv"):
+                file_patterns.append(file_info["path"])
+        
+        for file_path in file_patterns:
+            result = dbfs_read_file(file_path)
+            if result["status"] == "success":
                 try:
-                    # Read CSV content
-                    content = file_result["content"]
-                    df_part = pd.read_csv(io.StringIO(content))
-                    all_data.append(df_part)
+                    df = pd.read_csv(io.StringIO(result["content"]))
+                    st.success(f"✅ Loaded predictions from: {file_path}")
+                    return df
                 except Exception as e:
                     continue
         
-        if not all_data:
-            return None
-            
-        # Combine all parts
-        combined_df = pd.concat(all_data, ignore_index=True)
-        return combined_df
+        return None
         
     except Exception as e:
+        st.error(f"Error loading predictions: {str(e)}")
         return None
 
-def load_predictions_from_single_file(file_path):
-    """Load predictions from a single CSV file"""
-    try:
-        file_result = dbfs_read_file(file_path)
-        if file_result["status"] == "success":
-            content = file_result["content"]
-            df = pd.read_csv(io.StringIO(content))
-            return df
-    except Exception as e:
-        return None
-    return None
+def load_predictions_smart(session_id):
+    """Smart prediction loader with multiple fallbacks"""
+    base_path = f"/FileStore/results/{session_id}"
+    
+    # Try multiple file locations in order of preference
+    file_paths = [
+        f"{base_path}/predictions_direct.csv",      # Primary - direct CSV
+        f"{base_path}/predictions_sample.csv",      # Secondary - sample
+    ]
+    
+    for file_path in file_paths:
+        result = dbfs_read_file(file_path)
+        if result["status"] == "success":
+            try:
+                df = pd.read_csv(io.StringIO(result["content"]))
+                st.success(f"✅ Loaded from: {file_path}")
+                return df
+            except Exception as e:
+                continue
+    
+    # If direct files not found, try directory approach
+    return load_predictions_from_directory(base_path)
 
 def display_predictions(predictions_df, session_id):
     """Display predictions with download option"""
@@ -466,33 +501,20 @@ elif page == "Batch Scoring":
             if st.button("🔄 Refresh Predictions", key="refresh_predictions"):
                 st.rerun()
         
+        # NEW: Add debug button
+        if st.button("🐛 Debug File Search"):
+            debug_prediction_files(st.session_state.session_id)
+        
         # Display previous scoring results if available
         if st.session_state.scoring_results:
             st.subheader("📊 Previous Scoring Results")
             st.json(st.session_state.scoring_results)
             
             # Try to load and display previous predictions
-            predictions_base_path = f"/FileStore/results/{st.session_state.session_id}"
             st.info("🔄 Loading predictions...")
             
-            # Try multiple approaches to find predictions
-            predictions_df = None
-            
-            # Approach 1: Try to load from directory (Spark part files)
-            predictions_df = load_predictions_from_directory(predictions_base_path)
-            
-            # Approach 2: Try specific file paths
-            if predictions_df is None:
-                possible_files = [
-                    f"{predictions_base_path}/predictions.csv/part-00000-*.csv",
-                    f"{predictions_base_path}/predictions_single.csv/part-00000-*.csv",
-                    f"{predictions_base_path}/predictions.csv",
-                    f"{predictions_base_path}/predictions_single.csv"
-                ]
-                for file_path in possible_files:
-                    predictions_df = load_predictions_from_single_file(file_path)
-                    if predictions_df is not None:
-                        break
+            # NEW: Use smart prediction loader
+            predictions_df = load_predictions_smart(st.session_state.session_id)
             
             # Display predictions if found
             if predictions_df is not None:
@@ -567,7 +589,8 @@ elif page == "Batch Scoring":
                         
                         # Try to load predictions immediately
                         st.info("🔍 Loading predictions...")
-                        predictions_df = load_predictions_from_directory(predictions_base_path)
+                        # NEW: Use smart prediction loader
+                        predictions_df = load_predictions_smart(st.session_state.session_id)
                         
                         if predictions_df is not None:
                             st.session_state.predictions_data = predictions_df
