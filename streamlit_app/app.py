@@ -21,6 +21,8 @@ def initialize_session_state():
         st.session_state.run_id = None
     if 's3_file_path' not in st.session_state:
         st.session_state.s3_file_path = None
+    if 'uploaded_file' not in st.session_state:
+        st.session_state.uploaded_file = None
 
 def get_aws_config():
     """Get AWS configuration from secrets"""
@@ -84,8 +86,8 @@ def upload_to_s3(uploaded_file, aws_config):
         st.error(f"❌ Error uploading to S3: {str(e)}")
         return None
 
-def trigger_databricks_job(config, s3_file_path, model_type, enable_tuning, test_size):
-    """Trigger Databricks job via API"""
+def trigger_databricks_job(config, s3_file_path, model_type, enable_tuning, test_size, aws_config):
+    """Trigger Databricks job via API with AWS keys"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
         
@@ -94,11 +96,13 @@ def trigger_databricks_job(config, s3_file_path, model_type, enable_tuning, test
             "Content-Type": "application/json"
         }
         
-        # Job parameters
+        # Job parameters - include AWS keys for S3 access
         data = {
             "job_id": int(config['job_id']),
             "notebook_params": {
                 "s3_file_path": s3_file_path,
+                "aws_access_key": aws_config['aws_access_key'],
+                "aws_secret_key": aws_config['aws_secret_key'],
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
                 "test_size": str(test_size),
@@ -152,7 +156,7 @@ def get_job_status(config, run_id):
             "state_message": str(e)
         }
 
-def run_pipeline(s3_file_path, model_name, enable_tuning, test_size):
+def run_pipeline(s3_file_path, model_name, enable_tuning, test_size, aws_config):
     """Trigger the Databricks pipeline"""
     try:
         config = get_databricks_config()
@@ -168,8 +172,6 @@ def run_pipeline(s3_file_path, model_name, enable_tuning, test_size):
         model_mapping = {
             "Logistic Regression": "logistic",
             "Random Forest": "random_forest", 
-            "XGBoost": "xgboost",
-            "LightGBM": "lightgbm",
             "Neural Network": "neural_net"
         }
         
@@ -177,7 +179,7 @@ def run_pipeline(s3_file_path, model_name, enable_tuning, test_size):
         
         # Step 1: Trigger job
         status_text.info("🚀 Starting ML pipeline on Databricks...")
-        run_id = trigger_databricks_job(config, s3_file_path, model_code, enable_tuning, test_size)
+        run_id = trigger_databricks_job(config, s3_file_path, model_code, enable_tuning, test_size, aws_config)
         progress_bar.progress(30)
         
         if not run_id:
@@ -246,9 +248,43 @@ def show_results_section(config, run_id):
                 st.subheader("Execution Logs")
                 logs = output["notebook_output"]["result"] if isinstance(output["notebook_output"], dict) else output["notebook_output"]
                 st.text_area("Logs", logs, height=200)
-        
-        st.success("🎉 Pipeline completed! Check Databricks workspace for detailed results.")
-        
+            
+            # Try to get results from DBFS
+            try:
+                results_url = f"{config['host']}/api/2.0/dbfs/read"
+                headers = {"Authorization": f"Bearer {config['token']}"}
+                results_data = {"path": "/FileStore/results/results.json"}
+                
+                response = requests.get(results_url, headers=headers, json=results_data)
+                if response.status_code == 200:
+                    import base64
+                    results_content = base64.b64decode(response.json()["data"]).decode('utf-8')
+                    results = json.loads(results_content)
+                    
+                    if results.get("status") == "success":
+                        st.subheader("📈 Model Performance")
+                        metrics = results.get("metrics", {})
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Accuracy", f"{metrics.get('accuracy', 0):.4f}")
+                        with col2:
+                            st.metric("Precision", f"{metrics.get('precision', 0):.4f}")
+                        with col3:
+                            st.metric("Recall", f"{metrics.get('recall', 0):.4f}")
+                        with col4:
+                            st.metric("F1 Score", f"{metrics.get('f1_score', 0):.4f}")
+                        
+                        if "roc_auc" in metrics:
+                            st.metric("ROC AUC", f"{metrics.get('roc_auc', 0):.4f}")
+                        
+                        st.success("🎉 Model training completed successfully!")
+            except Exception as e:
+                st.info("📊 Check Databricks MLflow for detailed metrics")
+                
+        else:
+            st.info("📋 Check Databricks workspace for complete results")
+            
     except Exception as e:
         st.error(f"Error fetching results: {e}")
 
@@ -274,12 +310,10 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configuration")
         
-        # Model selection
+        # Model selection (only available models)
         model_options = [
             "Logistic Regression",
             "Random Forest", 
-            "XGBoost",
-            "LightGBM",
             "Neural Network"
         ]
         
@@ -293,6 +327,21 @@ def main():
         st.write(f"**Model:** {selected_model}")
         st.write(f"**Test Size:** {test_size}%")
         st.write(f"**Tuning:** {'Yes' if enable_tuning else 'No'}")
+        
+        st.markdown("---")
+        st.header("ℹ️ Info")
+        st.info("""
+        **Available Models:**
+        - Logistic Regression
+        - Random Forest  
+        - Neural Network
+        
+        **Process:**
+        1. Upload CSV file
+        2. File uploaded to S3
+        3. Start ML Pipeline
+        4. View results
+        """)
     
     # Main area
     col1, col2 = st.columns([1, 1])
@@ -307,6 +356,9 @@ def main():
         )
         
         if uploaded_file is not None:
+            # Store file in session state
+            st.session_state.uploaded_file = uploaded_file
+            
             # Preview data
             try:
                 df_preview = pd.read_csv(uploaded_file, nrows=5)
@@ -318,6 +370,7 @@ def main():
                 file_size = len(uploaded_file.getvalue()) / (1024*1024)
                 st.write(f"📊 **File Size:** {file_size:.2f} MB")
                 st.write(f"🎯 **Columns:** {len(df_preview.columns)}")
+                st.write(f"🔍 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:3])}...")
                 
                 # Upload to S3
                 if not st.session_state.s3_file_path:
@@ -329,6 +382,8 @@ def main():
                 
             except Exception as e:
                 st.error(f"Error reading file: {e}")
+        else:
+            st.info("👆 Please upload a CSV file to begin")
     
     with col2:
         st.header("🚀 Run ML Pipeline")
@@ -337,13 +392,14 @@ def main():
             st.success("✅ File uploaded to S3 successfully!")
             st.info(f"**S3 Path:** `{st.session_state.s3_file_path}`")
             
-            st.write("**Ready to run pipeline with:**")
+            st.write("**Pipeline Configuration:**")
             st.write(f"- **Model:** {selected_model}")
             st.write(f"- **Test Size:** {test_size}%")
-            st.write(f"- **Tuning:** {'Yes' if enable_tuning else 'No'}")
+            st.write(f"- **Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
+            st.write(f"- **S3 Bucket:** {aws_config['s3_bucket']}")
             
             if st.button("🎯 Start ML Pipeline", type="primary", use_container_width=True):
-                run_pipeline(st.session_state.s3_file_path, selected_model, enable_tuning, test_size)
+                run_pipeline(st.session_state.s3_file_path, selected_model, enable_tuning, test_size, aws_config)
             
             # Show status
             if st.session_state.job_status == 'running':
@@ -353,7 +409,7 @@ def main():
             elif st.session_state.job_status == 'failed':
                 st.error("❌ Pipeline failed.")
         
-        elif uploaded_file is not None:
+        elif st.session_state.uploaded_file is not None:
             st.info("👆 Click 'Upload to S3 Bucket' to proceed")
         else:
             st.info("📁 Please upload a CSV file to begin")
