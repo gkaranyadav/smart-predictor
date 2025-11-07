@@ -3,7 +3,8 @@ import pandas as pd
 import requests
 import json
 import time
-import os
+import boto3
+from io import BytesIO
 
 # Page configuration
 st.set_page_config(
@@ -16,12 +17,24 @@ def initialize_session_state():
     """Initialize session state variables"""
     if 'job_status' not in st.session_state:
         st.session_state.job_status = 'not_started'
-    if 'job_id' not in st.session_state:
-        st.session_state.job_id = None
     if 'run_id' not in st.session_state:
         st.session_state.run_id = None
-    if 'results' not in st.session_state:
-        st.session_state.results = None
+    if 's3_file_path' not in st.session_state:
+        st.session_state.s3_file_path = None
+
+def get_aws_config():
+    """Get AWS configuration from secrets"""
+    try:
+        config = {
+            'aws_access_key': st.secrets["AWS"]["ACCESS_KEY_ID"],
+            'aws_secret_key': st.secrets["AWS"]["SECRET_ACCESS_KEY"],
+            's3_bucket': st.secrets["AWS"]["S3_BUCKET"],
+            'aws_region': st.secrets["AWS"]["REGION"]
+        }
+        return config
+    except Exception as e:
+        st.error(f"❌ Error loading AWS configuration: {e}")
+        return None
 
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
@@ -36,7 +49,42 @@ def get_databricks_config():
         st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
 
-def trigger_databricks_job(config, model_type, enable_tuning, test_size):
+def upload_to_s3(uploaded_file, aws_config):
+    """Upload file to your existing S3 bucket"""
+    try:
+        # Initialize S3 client with your credentials
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=aws_config['aws_access_key'],
+            aws_secret_access_key=aws_config['aws_secret_key'],
+            region_name=aws_config['aws_region']
+        )
+        
+        # Generate unique file name
+        timestamp = int(time.time())
+        file_name = f"ml-pipeline-datasets/{timestamp}_{uploaded_file.name}"
+        s3_path = f"s3://{aws_config['s3_bucket']}/{file_name}"
+        
+        # Upload file to your existing bucket
+        with st.spinner(f"📤 Uploading {uploaded_file.name} to your S3 bucket..."):
+            # Reset file pointer
+            uploaded_file.seek(0)
+            
+            s3_client.upload_fileobj(
+                uploaded_file,
+                aws_config['s3_bucket'],
+                file_name
+            )
+        
+        st.success(f"✅ File successfully uploaded to your S3 bucket!")
+        st.info(f"**S3 Path:** `{s3_path}`")
+        return s3_path
+        
+    except Exception as e:
+        st.error(f"❌ Error uploading to S3: {str(e)}")
+        return None
+
+def trigger_databricks_job(config, s3_file_path, model_type, enable_tuning, test_size):
     """Trigger Databricks job via API"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
@@ -50,6 +98,7 @@ def trigger_databricks_job(config, model_type, enable_tuning, test_size):
         data = {
             "job_id": int(config['job_id']),
             "notebook_params": {
+                "s3_file_path": s3_file_path,
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
                 "test_size": str(test_size),
@@ -57,12 +106,10 @@ def trigger_databricks_job(config, model_type, enable_tuning, test_size):
             }
         }
         
-        st.info("🚀 Starting Databricks job...")
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code == 200:
             run_id = response.json()["run_id"]
-            st.success(f"✅ Job started successfully! Run ID: {run_id}")
             return run_id
         else:
             st.error(f"❌ Job trigger failed: {response.text}")
@@ -73,7 +120,7 @@ def trigger_databricks_job(config, model_type, enable_tuning, test_size):
         return None
 
 def get_job_status(config, run_id):
-    """Get job status with detailed information"""
+    """Get job status"""
     try:
         url = f"{config['host']}/api/2.0/jobs/runs/get?run_id={run_id}"
         
@@ -86,87 +133,26 @@ def get_job_status(config, run_id):
         if response.status_code == 200:
             result = response.json()
             state = result["state"]
-            
-            # Get task run state for more detailed status
-            task_states = []
-            if "tasks" in result:
-                for task in result["tasks"]:
-                    task_states.append({
-                        "task_key": task.get("task_key", "unknown"),
-                        "state": task.get("state", {}).get("life_cycle_state", "UNKNOWN"),
-                        "result_state": task.get("state", {}).get("result_state", "UNKNOWN")
-                    })
-            
             return {
                 "life_cycle_state": state["life_cycle_state"],
                 "result_state": state.get("result_state", "UNKNOWN"),
-                "state_message": state.get("state_message", ""),
-                "task_states": task_states
+                "state_message": state.get("state_message", "")
             }
         else:
             return {
                 "life_cycle_state": "UNKNOWN",
                 "result_state": "FAILED", 
-                "state_message": f"API Error: {response.text}",
-                "task_states": []
+                "state_message": f"API Error: {response.text}"
             }
             
     except Exception as e:
         return {
             "life_cycle_state": "ERROR",
             "result_state": "FAILED",
-            "state_message": str(e),
-            "task_states": []
+            "state_message": str(e)
         }
 
-def get_job_output(config, run_id):
-    """Get job output"""
-    try:
-        url = f"{config['host']}/api/2.0/jobs/runs/get-output?run_id={run_id}"
-        headers = {"Authorization": f"Bearer {config['token']}"}
-        
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            return response.json()
-        else:
-            return None
-    except Exception as e:
-        st.error(f"Error fetching job output: {e}")
-        return None
-
-def get_detailed_status_message(status_info):
-    """Convert job status to user-friendly messages"""
-    state = status_info["life_cycle_state"]
-    
-    status_messages = {
-        "PENDING": "🔄 Job is queued and waiting for resources...",
-        "RUNNING": "🔄 Job is running...",
-        "TERMINATING": "🔄 Job is finishing up...",
-        "TERMINATED": "✅ Job completed!",
-        "SKIPPED": "⚠️ Job was skipped",
-        "INTERNAL_ERROR": "❌ Internal error occurred",
-    }
-    
-    base_message = status_messages.get(state, f"🔄 Current status: {state}")
-    
-    # Add task-specific status
-    task_messages = []
-    for task in status_info.get("task_states", []):
-        task_state = task["state"]
-        if task_state == "PENDING":
-            task_messages.append("📁 Waiting for file upload...")
-        elif task_state == "RUNNING":
-            task_messages.append("🤖 Processing uploaded file...")
-        elif task_state == "TERMINATED" and task["result_state"] == "SUCCESS":
-            task_messages.append("✅ File processed successfully!")
-    
-    if task_messages:
-        base_message += " | " + " | ".join(task_messages)
-    
-    return base_message
-
-def run_pipeline(model_name, enable_tuning, test_size):
+def run_pipeline(s3_file_path, model_name, enable_tuning, test_size):
     """Trigger the Databricks pipeline"""
     try:
         config = get_databricks_config()
@@ -177,7 +163,6 @@ def run_pipeline(model_name, enable_tuning, test_size):
         # Show progress
         progress_bar = st.progress(0)
         status_text = st.empty()
-        detailed_status = st.empty()
         
         # Map model names to internal codes
         model_mapping = {
@@ -192,10 +177,8 @@ def run_pipeline(model_name, enable_tuning, test_size):
         
         # Step 1: Trigger job
         status_text.info("🚀 Starting ML pipeline on Databricks...")
-        detailed_status.info("Initializing job...")
-        
-        run_id = trigger_databricks_job(config, model_code, enable_tuning, test_size)
-        progress_bar.progress(10)
+        run_id = trigger_databricks_job(config, s3_file_path, model_code, enable_tuning, test_size)
+        progress_bar.progress(30)
         
         if not run_id:
             st.error("❌ Failed to start Databricks job.")
@@ -205,25 +188,21 @@ def run_pipeline(model_name, enable_tuning, test_size):
         st.session_state.run_id = run_id
         st.session_state.job_status = 'running'
         
-        # Step 2: Poll for completion with detailed status
-        status_text.info("🔄 Job started! Waiting for file upload in Databricks...")
+        # Step 2: Poll for completion
+        status_text.info("🔄 Pipeline running... This may take a few minutes.")
         
-        max_attempts = 180  # 15 minutes max (5 seconds per check)
+        max_attempts = 120  # 10 minutes max
         for attempt in range(max_attempts):
             status_info = get_job_status(config, run_id)
             life_cycle_state = status_info["life_cycle_state"]
             
-            # Get user-friendly status message
-            status_message = get_detailed_status_message(status_info)
-            detailed_status.info(status_message)
-            
             # Update progress based on state
             if life_cycle_state == "PENDING":
-                progress = 0.1 + (attempt / max_attempts) * 0.3
-                status_text.info("📁 Please upload your file in the Databricks job now...")
+                progress = 0.3 + (attempt / max_attempts) * 0.2
+                status_text.info("⏳ Job queued...")
             elif life_cycle_state == "RUNNING":
-                progress = 0.4 + (attempt / max_attempts) * 0.5
-                status_text.info("🤖 Processing your file and training model...")
+                progress = 0.5 + (attempt / max_attempts) * 0.4
+                status_text.info("🤖 Processing data and training model...")
             else:
                 progress = 0.9
             
@@ -232,20 +211,17 @@ def run_pipeline(model_name, enable_tuning, test_size):
             if life_cycle_state in ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"]:
                 break
                 
-            time.sleep(5)  # Wait 5 seconds between checks
+            time.sleep(5)
         
         progress_bar.progress(1.0)
         
         if life_cycle_state == "TERMINATED" and status_info["result_state"] == "SUCCESS":
             status_text.success("✅ Pipeline completed successfully!")
-            detailed_status.success("All steps completed! Showing results...")
             st.session_state.job_status = 'completed'
-            
-            # Show results section
             show_results_section(config, run_id)
         else:
             status_text.error(f"❌ Pipeline ended with status: {life_cycle_state}")
-            detailed_status.error(f"Result: {status_info['result_state']} - {status_info['state_message']}")
+            st.error(f"Error: {status_info['state_message']}")
             st.session_state.job_status = 'failed'
         
     except Exception as e:
@@ -259,52 +235,20 @@ def show_results_section(config, run_id):
         st.header("📊 Pipeline Results")
         
         # Get job output
-        output = get_job_output(config, run_id)
+        url = f"{config['host']}/api/2.0/jobs/runs/get-output?run_id={run_id}"
+        headers = {"Authorization": f"Bearer {config['token']}"}
         
-        if output:
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            output = response.json()
             if "notebook_output" in output and output["notebook_output"]:
                 st.subheader("Execution Logs")
                 logs = output["notebook_output"]["result"] if isinstance(output["notebook_output"], dict) else output["notebook_output"]
                 st.text_area("Logs", logs, height=200)
-            
-            # Try to get results from DBFS
-            try:
-                results_url = f"{config['host']}/api/2.0/dbfs/read"
-                headers = {"Authorization": f"Bearer {config['token']}"}
-                results_data = {
-                    "path": "/FileStore/results/results.json"
-                }
-                
-                response = requests.get(results_url, headers=headers, json=results_data)
-                if response.status_code == 200:
-                    import base64
-                    results_content = base64.b64decode(response.json()["data"]).decode('utf-8')
-                    results = json.loads(results_content)
-                    
-                    if results.get("status") == "success":
-                        st.subheader("📈 Model Performance")
-                        metrics = results.get("metrics", {})
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Accuracy", f"{metrics.get('accuracy', 0):.4f}")
-                        with col2:
-                            st.metric("Precision", f"{metrics.get('precision', 0):.4f}")
-                        with col3:
-                            st.metric("Recall", f"{metrics.get('recall', 0):.4f}")
-                        with col4:
-                            st.metric("F1 Score", f"{metrics.get('f1_score', 0):.4f}")
-                        
-                        if "roc_auc" in metrics:
-                            st.metric("ROC AUC", f"{metrics.get('roc_auc', 0):.4f}")
-                        
-                        st.success("🎉 Model training completed successfully!")
-            except Exception as e:
-                st.info("📊 Check Databricks MLflow for detailed metrics and visualizations")
-                
-        else:
-            st.info("📋 Check Databricks workspace for complete results and visualizations")
-            
+        
+        st.success("🎉 Pipeline completed! Check Databricks workspace for detailed results.")
+        
     except Exception as e:
         st.error(f"Error fetching results: {e}")
 
@@ -312,27 +256,23 @@ def main():
     initialize_session_state()
     
     st.title("🚀 Databricks ML Pipeline")
-    st.markdown("Start the pipeline and upload your file directly in Databricks!")
+    st.markdown("Upload your dataset and train ML models using your existing S3 bucket!")
     
-    # Check configuration first
-    config = get_databricks_config()
+    # Check configurations
+    aws_config = get_aws_config()
+    databricks_config = get_databricks_config()
+    
+    if not aws_config:
+        st.error("❌ AWS configuration missing.")
+        return
+        
+    if not databricks_config:
+        st.error("❌ Databricks configuration missing.")
+        return
     
     # Sidebar for configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
-        
-        if not config:
-            st.error("Please configure Databricks secrets in Streamlit Cloud")
-            st.info("""
-            **Required secrets in Streamlit Cloud:**
-            ```
-            [DATABRICKS]
-            HOST = "https://your-workspace.cloud.databricks.com"
-            TOKEN = "dapiyour-token"
-            JOB_ID = "1234567890"
-            ```
-            """)
-            return
         
         # Model selection
         model_options = [
@@ -343,57 +283,80 @@ def main():
             "Neural Network"
         ]
         
-        selected_model = st.selectbox(
-            "Select Model",
-            options=model_options,
-            index=1
-        )
-        
-        # Hyperparameter tuning option
+        selected_model = st.selectbox("Select Model", options=model_options, index=1)
         enable_tuning = st.checkbox("Enable Hyperparameter Tuning", value=False)
-        
-        # Test size - user selects from 10% to 40%
         test_size = st.slider("Test Set Size (%)", 10, 40, 20)
         
         st.markdown("---")
-        st.header("📊 Workflow")
-        st.info("""
-        **Process:**
-        1. Click 'Start ML Pipeline' below
-        2. Upload your file in Databricks job
-        3. Wait for processing
-        4. View results here
-        """)
-        
-        # Display current configuration
-        st.markdown("### Current Settings")
+        st.header("📊 Current Setup")
+        st.success(f"✅ Using existing S3 bucket: **{aws_config['s3_bucket']}**")
         st.write(f"**Model:** {selected_model}")
         st.write(f"**Test Size:** {test_size}%")
         st.write(f"**Tuning:** {'Yes' if enable_tuning else 'No'}")
     
     # Main area
-    st.header("🚀 Start ML Pipeline")
+    col1, col2 = st.columns([1, 1])
     
-    st.info("""
-    **How it works:**
-    - Click the button below to start the Databricks job
-    - The job will open in Databricks and wait for file upload
-    - Upload your CSV file directly in the Databricks interface
-    - The pipeline will process your file and train the model
-    - Results will appear here when complete
-    """)
+    with col1:
+        st.header("📁 Upload Dataset")
+        
+        uploaded_file = st.file_uploader(
+            "Choose a CSV file", 
+            type=['csv'],
+            help="Select your dataset file"
+        )
+        
+        if uploaded_file is not None:
+            # Preview data
+            try:
+                df_preview = pd.read_csv(uploaded_file, nrows=5)
+                st.subheader("Data Preview")
+                st.dataframe(df_preview)
+                
+                st.subheader("Dataset Info")
+                st.write(f"📏 **Shape:** {df_preview.shape}")
+                file_size = len(uploaded_file.getvalue()) / (1024*1024)
+                st.write(f"📊 **File Size:** {file_size:.2f} MB")
+                st.write(f"🎯 **Columns:** {len(df_preview.columns)}")
+                
+                # Upload to S3
+                if not st.session_state.s3_file_path:
+                    if st.button("📤 Upload to S3 Bucket", type="primary", use_container_width=True):
+                        s3_path = upload_to_s3(uploaded_file, aws_config)
+                        if s3_path:
+                            st.session_state.s3_file_path = s3_path
+                            st.rerun()
+                
+            except Exception as e:
+                st.error(f"Error reading file: {e}")
     
-    # Start pipeline button
-    if st.button("🎯 Start ML Pipeline", type="primary", use_container_width=True):
-        run_pipeline(selected_model, enable_tuning, test_size)
-    
-    # Show current status
-    if st.session_state.job_status == 'running':
-        st.info("🔄 Pipeline is running... Check Databricks for file upload prompt.")
-    elif st.session_state.job_status == 'completed':
-        st.success("✅ Pipeline completed! Results shown above.")
-    elif st.session_state.job_status == 'failed':
-        st.error("❌ Pipeline failed. Check Databricks logs for details.")
+    with col2:
+        st.header("🚀 Run ML Pipeline")
+        
+        if st.session_state.s3_file_path:
+            st.success("✅ File uploaded to S3 successfully!")
+            st.info(f"**S3 Path:** `{st.session_state.s3_file_path}`")
+            
+            st.write("**Ready to run pipeline with:**")
+            st.write(f"- **Model:** {selected_model}")
+            st.write(f"- **Test Size:** {test_size}%")
+            st.write(f"- **Tuning:** {'Yes' if enable_tuning else 'No'}")
+            
+            if st.button("🎯 Start ML Pipeline", type="primary", use_container_width=True):
+                run_pipeline(st.session_state.s3_file_path, selected_model, enable_tuning, test_size)
+            
+            # Show status
+            if st.session_state.job_status == 'running':
+                st.info("🔄 Pipeline is running...")
+            elif st.session_state.job_status == 'completed':
+                st.success("✅ Pipeline completed!")
+            elif st.session_state.job_status == 'failed':
+                st.error("❌ Pipeline failed.")
+        
+        elif uploaded_file is not None:
+            st.info("👆 Click 'Upload to S3 Bucket' to proceed")
+        else:
+            st.info("📁 Please upload a CSV file to begin")
 
 if __name__ == "__main__":
     main()
