@@ -3,7 +3,6 @@ import pandas as pd
 import requests
 import json
 import time
-import base64
 import os
 import tempfile
 
@@ -24,8 +23,8 @@ def initialize_session_state():
         st.session_state.results = None
     if 'uploaded_file_path' not in st.session_state:
         st.session_state.uploaded_file_path = None
-    if 'dbfs_file_path' not in st.session_state:
-        st.session_state.dbfs_file_path = None
+    if 'file_uploaded_to_dbfs' not in st.session_state:
+        st.session_state.file_uploaded_to_dbfs = False
 
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
@@ -52,50 +51,36 @@ def save_uploaded_file(uploaded_file):
         st.error(f"❌ Error saving file: {e}")
         return None
 
-def upload_file_to_dbfs(config, local_file_path, filename):
-    """Upload file directly to DBFS using Databricks API"""
+def check_file_in_dbfs(config, filename):
+    """Check if file exists in DBFS"""
     try:
-        # Read file content
-        with open(local_file_path, 'rb') as f:
-            content = f.read()
-        
-        # DBFS path
-        dbfs_path = f"/FileStore/uploads/{filename}"
-        full_dbfs_path = f"dbfs:{dbfs_path}"
-        
-        st.info(f"📤 Uploading {filename} to DBFS...")
-        
-        # Use the simpler single-call API approach
-        url = f"{config['host']}/api/2.0/dbfs/put"
-        
+        url = f"{config['host']}/api/2.0/dbfs/list"
         headers = {
             "Authorization": f"Bearer {config['token']}",
             "Content-Type": "application/json"
         }
         
-        # Convert content to base64
-        content_b64 = base64.b64encode(content).decode('utf-8')
-        
         data = {
-            "path": dbfs_path,
-            "contents": content_b64,
-            "overwrite": True
+            "path": "/FileStore/uploads/"
         }
         
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code == 200:
-            st.success(f"✅ File uploaded successfully to: {full_dbfs_path}")
-            return full_dbfs_path
+            files = response.json().get("files", [])
+            for file_info in files:
+                if file_info["path"].endswith(filename):
+                    return True
+            return False
         else:
-            st.error(f"❌ Failed to upload file: {response.text}")
-            return None
+            st.error(f"❌ Error checking DBFS: {response.text}")
+            return False
             
     except Exception as e:
-        st.error(f"❌ Error uploading file to DBFS: {e}")
-        return None
+        st.error(f"❌ Error checking file existence: {e}")
+        return False
 
-def trigger_databricks_job(config, dbfs_file_path, model_type, enable_tuning, test_size):
+def trigger_databricks_job(config, filename, model_type, enable_tuning, test_size):
     """Trigger Databricks job via API"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
@@ -105,11 +90,14 @@ def trigger_databricks_job(config, dbfs_file_path, model_type, enable_tuning, te
             "Content-Type": "application/json"
         }
         
+        # DBFS path
+        dbfs_path = f"dbfs:/FileStore/uploads/{filename}"
+        
         # Job parameters
         data = {
             "job_id": int(config['job_id']),
             "notebook_params": {
-                "input_path": dbfs_file_path,
+                "input_path": dbfs_path,
                 "output_path": "dbfs:/FileStore/results",
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
@@ -169,7 +157,7 @@ def get_job_output(config, run_id):
         st.error(f"Error fetching job output: {e}")
         return None
 
-def run_pipeline(dbfs_file_path, model_name, enable_tuning, test_size):
+def run_pipeline(filename, model_name, enable_tuning, test_size):
     """Trigger the Databricks pipeline"""
     try:
         config = get_databricks_config()
@@ -192,10 +180,19 @@ def run_pipeline(dbfs_file_path, model_name, enable_tuning, test_size):
         
         model_code = model_mapping[model_name]
         
-        # Step 1: Trigger job
-        status_text.info("🚀 Starting ML pipeline on Databricks...")
-        run_id = trigger_databricks_job(config, dbfs_file_path, model_code, enable_tuning, test_size)
+        # Step 1: Check if file exists in DBFS
+        status_text.info("🔍 Checking if file exists in Databricks DBFS...")
+        if not check_file_in_dbfs(config, filename):
+            st.error(f"❌ File '{filename}' not found in Databricks DBFS!")
+            st.error("Please run the CLI command above to upload your file first.")
+            return
+        
         progress_bar.progress(30)
+        
+        # Step 2: Trigger job
+        status_text.info("🚀 Starting ML pipeline on Databricks...")
+        run_id = trigger_databricks_job(config, filename, model_code, enable_tuning, test_size)
+        progress_bar.progress(50)
         
         if not run_id:
             st.error("❌ Failed to trigger Databricks job.")
@@ -205,7 +202,7 @@ def run_pipeline(dbfs_file_path, model_name, enable_tuning, test_size):
         st.session_state.job_id = run_id
         st.session_state.job_status = 'running'
         
-        # Step 2: Poll for completion
+        # Step 3: Poll for completion
         status_text.info("🔄 Pipeline running... This may take a few minutes.")
         
         max_attempts = 120  # 10 minutes max (5 seconds per check)
@@ -272,38 +269,6 @@ def show_results_section(config, run_id):
                 - 📋 **Job Runs**: Detailed execution logs
                 """)
                 
-                # Try to get results from DBFS
-                try:
-                    results_url = f"{config['host']}/api/2.0/dbfs/read"
-                    headers = {"Authorization": f"Bearer {config['token']}"}
-                    results_data = {
-                        "path": "/FileStore/results/results.json"
-                    }
-                    
-                    response = requests.get(results_url, headers=headers, json=results_data)
-                    if response.status_code == 200:
-                        results_content = base64.b64decode(response.json()["data"]).decode('utf-8')
-                        results = json.loads(results_content)
-                        
-                        if results.get("status") == "success":
-                            st.subheader("📈 Model Performance")
-                            metrics = results.get("metrics", {})
-                            
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("Accuracy", f"{metrics.get('accuracy', 0):.4f}")
-                            with col2:
-                                st.metric("Precision", f"{metrics.get('precision', 0):.4f}")
-                            with col3:
-                                st.metric("Recall", f"{metrics.get('recall', 0):.4f}")
-                            with col4:
-                                st.metric("F1 Score", f"{metrics.get('f1_score', 0):.4f}")
-                            
-                            if "roc_auc" in metrics:
-                                st.metric("ROC AUC", f"{metrics.get('roc_auc', 0):.4f}")
-                except Exception as e:
-                    st.warning("Could not load detailed results from DBFS")
-                    
         else:
             st.warning("Could not fetch job output. Check Databricks workspace for results.")
             
@@ -360,9 +325,9 @@ def main():
         st.markdown("---")
         st.header("📊 Dataset Info")
         st.info("""
-        **Process:**
-        1. Upload CSV file
-        2. File automatically uploaded to Databricks DBFS
+        **Three-Step Process:**
+        1. Upload CSV file below
+        2. Run CLI command to upload to Databricks
         3. Run ML Pipeline
         """)
         
@@ -376,7 +341,7 @@ def main():
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.header("📁 Data Upload")
+        st.header("📁 Step 1: Data Upload")
         
         # File upload
         uploaded_file = st.file_uploader(
@@ -394,7 +359,8 @@ def main():
                 
                 st.subheader("Dataset Info")
                 st.write(f"📏 **Shape:** {df_preview.shape}")
-                st.write(f"📊 **File Size:** {len(uploaded_file.getvalue()) / (1024*1024):.2f} MB")
+                file_size_mb = len(uploaded_file.getvalue()) / (1024*1024)
+                st.write(f"📊 **File Size:** {file_size_mb:.2f} MB")
                 st.write(f"🎯 **Columns:** {len(df_preview.columns)}")
                 st.write(f"🔍 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:5])}...")
                 
@@ -403,13 +369,33 @@ def main():
                 if file_path:
                     st.session_state.uploaded_file_path = file_path
                     
-                    # Upload to DBFS
-                    if st.button("📤 Upload to Databricks DBFS", type="secondary"):
-                        with st.spinner("Uploading file to Databricks..."):
-                            dbfs_path = upload_file_to_dbfs(config, file_path, uploaded_file.name)
-                            if dbfs_path:
-                                st.session_state.dbfs_file_path = dbfs_path
-                                st.success("✅ Ready to run pipeline!")
+                    st.header("📤 Step 2: Upload to Databricks")
+                    st.info("""
+                    **Run this command in your terminal to upload the file to Databricks:**
+                    """)
+                    
+                    # CLI command with proper formatting
+                    cli_command = f'databricks fs cp "{file_path}" "dbfs:/FileStore/uploads/{uploaded_file.name}"'
+                    
+                    st.code(cli_command, language="bash")
+                    
+                    # Additional instructions
+                    st.info("""
+                    **Instructions:**
+                    1. Open your terminal/command prompt
+                    2. Ensure you have Databricks CLI installed and configured
+                    3. Run the command above
+                    4. Come back here and click 'Check Upload Status' below
+                    """)
+                    
+                    # Check upload status button
+                    if st.button("🔄 Check Upload Status", type="secondary"):
+                        if check_file_in_dbfs(config, uploaded_file.name):
+                            st.success(f"✅ File '{uploaded_file.name}' found in Databricks DBFS!")
+                            st.session_state.file_uploaded_to_dbfs = True
+                        else:
+                            st.error(f"❌ File '{uploaded_file.name}' not found in DBFS!")
+                            st.error("Please run the CLI command above first.")
                 
             except Exception as e:
                 st.error(f"Error reading file: {e}")
@@ -417,20 +403,20 @@ def main():
             st.info("👆 Please upload a CSV file to begin")
     
     with col2:
-        st.header("🚀 Pipeline Controls")
+        st.header("🚀 Step 3: Run ML Pipeline")
         
-        if st.session_state.dbfs_file_path:
+        if st.session_state.get('file_uploaded_to_dbfs') and uploaded_file is not None:
             # Display current configuration
             st.subheader("Pipeline Configuration")
-            st.write(f"**Dataset:** {os.path.basename(st.session_state.dbfs_file_path)}")
-            st.write(f"**DBFS Path:** `{st.session_state.dbfs_file_path}`")
+            st.write(f"**Dataset:** {uploaded_file.name}")
+            st.write(f"**DBFS Path:** `dbfs:/FileStore/uploads/{uploaded_file.name}`")
             st.write(f"**Model:** {selected_model}")
             st.write(f"**Test Size:** {test_size}%")
             st.write(f"**Tuning:** {'Enabled' if enable_tuning else 'Disabled'}")
             
             # Run pipeline button
             if st.button("🎯 Run ML Pipeline", type="primary", use_container_width=True):
-                run_pipeline(st.session_state.dbfs_file_path, selected_model, enable_tuning, test_size)
+                run_pipeline(uploaded_file.name, selected_model, enable_tuning, test_size)
             
             # Show status
             if st.session_state.job_status == 'running':
@@ -440,10 +426,17 @@ def main():
             elif st.session_state.job_status == 'failed':
                 st.error("❌ Pipeline failed. Check Databricks logs for details.")
         
-        elif st.session_state.uploaded_file_path and not st.session_state.dbfs_file_path:
-            st.warning("⚠️ Please upload the file to Databricks DBFS first using the button above.")
+        elif uploaded_file is not None and not st.session_state.get('file_uploaded_to_dbfs'):
+            st.warning("""
+            ⚠️ **File not yet uploaded to Databricks**
+            
+            Please complete Step 2:
+            1. Run the CLI command shown in Step 2
+            2. Click 'Check Upload Status' to verify
+            3. Then you can run the pipeline
+            """)
         else:
-            st.info("Please upload a CSV file and transfer it to Databricks DBFS")
+            st.info("Please complete Steps 1 and 2 first")
 
 if __name__ == "__main__":
     main()
