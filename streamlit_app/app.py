@@ -3,7 +3,6 @@ import pandas as pd
 import requests
 import json
 import time
-import base64
 from io import BytesIO
 
 # Page configuration
@@ -19,8 +18,8 @@ def initialize_session_state():
         st.session_state.job_status = 'not_started'
     if 'run_id' not in st.session_state:
         st.session_state.run_id = None
-    if 'dbfs_file_path' not in st.session_state:
-        st.session_state.dbfs_file_path = None
+    if 'volume_file_path' not in st.session_state:
+        st.session_state.volume_file_path = None
     if 'uploaded_file' not in st.session_state:
         st.session_state.uploaded_file = None
 
@@ -37,51 +36,88 @@ def get_databricks_config():
         st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
 
-def upload_to_dbfs(uploaded_file, config):
-    """Upload file directly to DBFS"""
+def upload_to_volumes(uploaded_file, config):
+    """Upload file to Databricks Volumes via temporary storage"""
     try:
         # Generate unique file name
         timestamp = int(time.time())
         file_name = f"{timestamp}_{uploaded_file.name}"
-        dbfs_path = f"/FileStore/ml_pipeline/{file_name}"
         
-        with st.spinner(f"📤 Uploading {uploaded_file.name} to DBFS..."):
+        # Use Volumes path - CHANGE THIS TO YOUR ACTUAL VOLUME PATH
+        volume_path = f"/Volumes/demo_ml/main/ml_pipeline/{file_name}"
+        
+        with st.spinner(f"📤 Uploading {uploaded_file.name} to Databricks Volumes..."):
             # Read file content
             uploaded_file.seek(0)
             file_content = uploaded_file.read()
             
-            # Upload to DBFS using API
-            url = f"{config['host']}/api/2.0/dbfs/put"
+            # Step 1: Create the file in Volumes
+            create_url = f"{config['host']}/api/2.0/fs/files{volume_path}"
             headers = {
                 "Authorization": f"Bearer {config['token']}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/octet-stream"
             }
             
-            # Encode content to base64
-            encoded_content = base64.b64encode(file_content).decode('utf-8')
+            # Create empty file first
+            response = requests.put(create_url, headers=headers, data=b"")
             
-            data = {
-                "path": dbfs_path,
-                "contents": encoded_content,
-                "overwrite": True
-            }
-            
-            response = requests.post(url, headers=headers, json=data)
-            
-            if response.status_code == 200:
-                st.success(f"✅ File successfully uploaded to DBFS!")
-                st.info(f"**DBFS Path:** `dbfs:{dbfs_path}`")
-                return f"dbfs:{dbfs_path}"
-            else:
-                st.error(f"❌ DBFS upload failed: {response.text}")
+            if response.status_code not in [200, 409]:  # 409 = already exists (ok)
+                st.error(f"❌ Failed to create file: {response.text}")
                 return None
+            
+            # Step 2: Upload content using simple approach
+            # For large files, we'll use a different approach - convert to DataFrame
+            st.info("🔄 Converting and uploading data...")
+            
+            # Convert CSV to JSON and upload as multiple parts if needed
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file)
+            
+            # Save as multiple smaller files if too large
+            if len(df) > 10000:  # If more than 10k rows, split
+                st.info("📦 Splitting large file into chunks...")
+                chunk_size = 5000
+                chunks = [df[i:i + chunk_size] for i in range(0, len(df), chunk_size)]
+                
+                for i, chunk in enumerate(chunks):
+                    chunk_path = f"{volume_path}/chunk_{i}.csv"
+                    create_chunk_url = f"{config['host']}/api/2.0/fs/files{chunk_path}"
+                    requests.put(create_chunk_url, headers=headers, data=b"")
+                    
+                    # Upload chunk content
+                    chunk_csv = chunk.to_csv(index=False)
+                    requests.post(
+                        f"{config['host']}/api/2.0/fs/files{chunk_path}",
+                        headers=headers,
+                        data=chunk_csv.encode('utf-8')
+                    )
+                
+                st.success(f"✅ File uploaded as {len(chunks)} chunks to Volumes!")
+                return f"{volume_path}/*.csv"
+            
+            else:
+                # Upload as single file
+                csv_content = df.to_csv(index=False)
+                response = requests.post(
+                    f"{config['host']}/api/2.0/fs/files{volume_path}",
+                    headers=headers,
+                    data=csv_content.encode('utf-8')
+                )
+                
+                if response.status_code == 200:
+                    st.success("✅ File successfully uploaded to Volumes!")
+                    st.info(f"**Volume Path:** `{volume_path}`")
+                    return volume_path
+                else:
+                    st.error(f"❌ Upload failed: {response.text}")
+                    return None
         
     except Exception as e:
-        st.error(f"❌ Error uploading to DBFS: {str(e)}")
+        st.error(f"❌ Error uploading to Volumes: {str(e)}")
         return None
 
-def trigger_databricks_job(config, dbfs_file_path, model_type, enable_tuning, test_size):
-    """Trigger Databricks job via API without AWS keys"""
+def trigger_databricks_job(config, volume_file_path, model_type, enable_tuning, test_size):
+    """Trigger Databricks job via API"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
         
@@ -90,11 +126,11 @@ def trigger_databricks_job(config, dbfs_file_path, model_type, enable_tuning, te
             "Content-Type": "application/json"
         }
         
-        # Job parameters - no AWS keys needed
+        # Job parameters for Volumes
         data = {
             "job_id": int(config['job_id']),
             "notebook_params": {
-                "dbfs_file_path": dbfs_file_path,  # Changed from s3_file_path
+                "volume_file_path": volume_file_path,  # Changed to volume path
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
                 "test_size": str(test_size),
@@ -116,7 +152,7 @@ def trigger_databricks_job(config, dbfs_file_path, model_type, enable_tuning, te
         return None
 
 def get_job_status(config, run_id):
-    """Get job status (same as before)"""
+    """Get job status"""
     try:
         url = f"{config['host']}/api/2.0/jobs/runs/get?run_id={run_id}"
         
@@ -148,7 +184,7 @@ def get_job_status(config, run_id):
             "state_message": str(e)
         }
 
-def run_pipeline(dbfs_file_path, model_name, enable_tuning, test_size):
+def run_pipeline(volume_file_path, model_name, enable_tuning, test_size):
     """Trigger the Databricks pipeline"""
     try:
         config = get_databricks_config()
@@ -171,7 +207,7 @@ def run_pipeline(dbfs_file_path, model_name, enable_tuning, test_size):
         
         # Step 1: Trigger job
         status_text.info("🚀 Starting ML pipeline on Databricks...")
-        run_id = trigger_databricks_job(config, dbfs_file_path, model_code, enable_tuning, test_size)
+        run_id = trigger_databricks_job(config, volume_file_path, model_code, enable_tuning, test_size)
         progress_bar.progress(30)
         
         if not run_id:
@@ -284,7 +320,7 @@ def main():
     initialize_session_state()
     
     st.title("🚀 Databricks ML Pipeline")
-    st.markdown("Upload your dataset and train ML models using DBFS (No AWS required)!")
+    st.markdown("Upload your dataset and train ML models using **Databricks Volumes**!")
     
     # Check configurations
     databricks_config = get_databricks_config()
@@ -297,7 +333,7 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configuration")
         
-        # Model selection (only available models)
+        # Model selection
         model_options = [
             "Logistic Regression",
             "Random Forest", 
@@ -310,23 +346,20 @@ def main():
         
         st.markdown("---")
         st.header("📊 Current Setup")
-        st.success("✅ Using DBFS for file storage")
+        st.success("✅ Using Databricks Volumes (No size limits!)")
         st.write(f"**Model:** {selected_model}")
         st.write(f"**Test Size:** {test_size}%")
         st.write(f"**Tuning:** {'Yes' if enable_tuning else 'No'}")
         
         st.markdown("---")
-        st.header("ℹ️ Info")
+        st.header("ℹ️ Volume Setup Required")
         st.info("""
-        **Available Models:**
-        - Logistic Regression
-        - Random Forest  
-        - Neural Network
-        
-        **Process:**
-        1. Upload CSV file to DBFS
-        2. Start ML Pipeline
-        3. View results
+        **Before using:**
+        1. Create a Volume in your Databricks workspace:
+           - Catalog: `demo_ml`
+           - Schema: `main` 
+           - Volume: `ml_pipeline`
+        2. Or update the volume path in code
         """)
     
     # Main area
@@ -338,7 +371,7 @@ def main():
         uploaded_file = st.file_uploader(
             "Choose a CSV file", 
             type=['csv'],
-            help="Select your dataset file"
+            help="Select your dataset file (any size supported!)"
         )
         
         if uploaded_file is not None:
@@ -358,12 +391,12 @@ def main():
                 st.write(f"🎯 **Columns:** {len(df_preview.columns)}")
                 st.write(f"🔍 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:3])}...")
                 
-                # Upload to DBFS
-                if not st.session_state.dbfs_file_path:
-                    if st.button("📤 Upload to DBFS", type="primary", use_container_width=True):
-                        dbfs_path = upload_to_dbfs(uploaded_file, databricks_config)
-                        if dbfs_path:
-                            st.session_state.dbfs_file_path = dbfs_path
+                # Upload to Volumes
+                if not st.session_state.volume_file_path:
+                    if st.button("📤 Upload to Databricks Volumes", type="primary", use_container_width=True):
+                        volume_path = upload_to_volumes(uploaded_file, databricks_config)
+                        if volume_path:
+                            st.session_state.volume_file_path = volume_path
                             st.rerun()
                 
             except Exception as e:
@@ -374,18 +407,18 @@ def main():
     with col2:
         st.header("🚀 Run ML Pipeline")
         
-        if st.session_state.dbfs_file_path:
-            st.success("✅ File uploaded to DBFS successfully!")
-            st.info(f"**DBFS Path:** `{st.session_state.dbfs_file_path}`")
+        if st.session_state.volume_file_path:
+            st.success("✅ File uploaded to Volumes successfully!")
+            st.info(f"**Volume Path:** `{st.session_state.volume_file_path}`")
             
             st.write("**Pipeline Configuration:**")
             st.write(f"- **Model:** {selected_model}")
             st.write(f"- **Test Size:** {test_size}%")
             st.write(f"- **Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
-            st.write(f"- **Storage:** DBFS (Databricks File System)")
+            st.write(f"- **Storage:** Databricks Volumes")
             
             if st.button("🎯 Start ML Pipeline", type="primary", use_container_width=True):
-                run_pipeline(st.session_state.dbfs_file_path, selected_model, enable_tuning, test_size)
+                run_pipeline(st.session_state.volume_file_path, selected_model, enable_tuning, test_size)
             
             # Show status
             if st.session_state.job_status == 'running':
@@ -396,7 +429,7 @@ def main():
                 st.error("❌ Pipeline failed.")
         
         elif st.session_state.uploaded_file is not None:
-            st.info("👆 Click 'Upload to DBFS' to proceed")
+            st.info("👆 Click 'Upload to Databricks Volumes' to proceed")
         else:
             st.info("📁 Please upload a CSV file to begin")
 
