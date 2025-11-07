@@ -65,7 +65,6 @@ def main():
         test_size = st.slider("Test Set Size (%)", 10, 40, 20)
         
         st.markdown("---")
-        st.markswith st.sidebar:
         st.header("📊 Dataset Info")
         st.info("Upload a CSV file for analysis and modeling")
     
