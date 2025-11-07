@@ -4,7 +4,8 @@ import requests
 import json
 import time
 import base64
-import io
+import os
+import tempfile
 
 # Page configuration
 st.set_page_config(
@@ -21,6 +22,8 @@ def initialize_session_state():
         st.session_state.job_id = None
     if 'results' not in st.session_state:
         st.session_state.results = None
+    if 'uploaded_file_path' not in st.session_state:
+        st.session_state.uploaded_file_path = None
 
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
@@ -35,91 +38,19 @@ def get_databricks_config():
         st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
 
-def upload_file_chunk_to_dbfs(chunk_content, chunk_path, config):
-    """Upload a single file chunk to DBFS"""
+def save_uploaded_file(uploaded_file):
+    """Save uploaded file to temporary location and return path"""
     try:
-        # Encode chunk content
-        encoded_content = base64.b64encode(chunk_content).decode()
-        
-        # DBFS API endpoint
-        url = f"{config['host']}/api/2.0/dbfs/put"
-        
-        headers = {
-            "Authorization": f"Bearer {config['token']}",
-            "Content-Type": "application/json"
-        }
-        
-        data = {
-            "path": chunk_path,
-            "contents": encoded_content,
-            "overwrite": True
-        }
-        
-        response = requests.post(url, headers=headers, json=data, timeout=30)
-        
-        if response.status_code == 200:
-            return True
-        else:
-            st.error(f"❌ Chunk upload failed with status {response.status_code}: {response.text}")
-            return False
-        
+        # Create temp file
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.csv') as tmp_file:
+            # Write uploaded file content to temp file
+            tmp_file.write(uploaded_file.getvalue())
+            return tmp_file.name
     except Exception as e:
-        st.error(f"❌ Exception in chunk upload: {str(e)}")
-        return False
-
-def split_and_upload_large_file(uploaded_file, file_name, config):
-    """Split large file by rows and upload to DBFS"""
-    try:
-        st.info("📦 Reading and splitting file by rows...")
-        
-        # Read the entire file with pandas to split by rows
-        df = pd.read_csv(uploaded_file)
-        total_rows = len(df)
-        
-        # Split into chunks of 10,000 rows each
-        CHUNK_ROWS = 10000
-        total_chunks = (total_rows + CHUNK_ROWS - 1) // CHUNK_ROWS
-        
-        st.write(f"📊 Total rows: {total_rows}, splitting into {total_chunks} chunks")
-        
-        chunk_paths = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i in range(total_chunks):
-            start_idx = i * CHUNK_ROWS
-            end_idx = min((i + 1) * CHUNK_ROWS, total_rows)
-            
-            # Get chunk of rows
-            chunk_df = df.iloc[start_idx:end_idx]
-            
-            # Convert to CSV bytes
-            chunk_csv = chunk_df.to_csv(index=False)
-            chunk_content = chunk_csv.encode('utf-8')
-            
-            # Upload this chunk
-            chunk_name = f"{file_name}_chunk_{i:03d}.csv"
-            chunk_path = f"/FileStore/uploads/{chunk_name}"
-            
-            status_text.info(f"📤 Uploading chunk {i+1}/{total_chunks}...")
-            st.write(f"Chunk {i+1} size: {len(chunk_content)/1024:.2f}KB, rows: {len(chunk_df)}")
-            
-            if upload_file_chunk_to_dbfs(chunk_content, chunk_path, config):
-                chunk_paths.append(f"dbfs:{chunk_path}")
-                progress_bar.progress((i + 1) / total_chunks)
-                st.success(f"✅ Chunk {i+1} uploaded successfully!")
-            else:
-                st.error(f"❌ Failed to upload chunk {i+1}")
-                return None
-        
-        status_text.success(f"✅ All {total_chunks} chunks uploaded successfully!")
-        return chunk_paths
-        
-    except Exception as e:
-        st.error(f"❌ Error splitting and uploading file: {e}")
+        st.error(f"❌ Error saving file: {e}")
         return None
 
-def trigger_databricks_job(config, chunk_paths, model_type, enable_tuning, test_size):
+def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_size):
     """Trigger Databricks job via API"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
@@ -129,11 +60,14 @@ def trigger_databricks_job(config, chunk_paths, model_type, enable_tuning, test_
             "Content-Type": "application/json"
         }
         
+        # CORRECT DBFS path format
+        dbfs_path = f"dbfs:/FileStore/uploads/{os.path.basename(file_path)}"
+        
         # Job parameters
         data = {
             "job_id": config['job_id'],
             "notebook_params": {
-                "chunk_paths": json.dumps(chunk_paths),  # Pass as JSON string
+                "input_path": dbfs_path,  # Single file path
                 "output_path": "/FileStore/results",
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
@@ -172,7 +106,7 @@ def get_job_status(config, run_id):
     except Exception as e:
         return "ERROR"
 
-def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
+def run_pipeline(file_path, model_name, enable_tuning, test_size):
     """Trigger the Databricks pipeline"""
     try:
         config = get_databricks_config()
@@ -184,18 +118,7 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Step 1: Split and upload file in chunks BY ROWS
-        status_text.info("📤 Splitting and uploading file to Databricks...")
-        
-        # Pass the uploaded_file object directly
-        chunk_paths = split_and_upload_large_file(uploaded_file, uploaded_file.name, config)
-        progress_bar.progress(50)
-        
-        if not chunk_paths:
-            st.error("❌ File upload failed. Cannot proceed with pipeline.")
-            return
-        
-        # Step 2: Trigger job
+        # Step 1: Trigger job with file path
         status_text.info("🚀 Starting ML pipeline on Databricks...")
         
         # Map model names to internal codes
@@ -208,8 +131,8 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
         }
         
         model_code = model_mapping[model_name]
-        run_id = trigger_databricks_job(config, chunk_paths, model_code, enable_tuning, test_size)
-        progress_bar.progress(75)
+        run_id = trigger_databricks_job(config, file_path, model_code, enable_tuning, test_size)
+        progress_bar.progress(50)
         
         if not run_id:
             st.error("❌ Failed to trigger Databricks job.")
@@ -219,7 +142,7 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
         st.session_state.job_id = run_id
         st.session_state.job_status = 'running'
         
-        # Step 3: Poll for completion
+        # Step 2: Poll for completion
         status_text.info("🔄 Pipeline running... This may take a few minutes.")
         
         max_attempts = 60  # 5 minutes max
@@ -229,7 +152,7 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
             if status in ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"]:
                 break
                 
-            progress = 0.75 + (attempt / max_attempts) * 0.20
+            progress = 0.50 + (attempt / max_attempts) * 0.45
             progress_bar.progress(min(progress, 0.95))
             time.sleep(5)  # Wait 5 seconds between checks
         
@@ -264,7 +187,6 @@ def show_results_section(config, run_id):
         if response.status_code == 200:
             output = response.json()
             
-            # Check if we have notebook output
             if "notebook_output" in output and output["notebook_output"]:
                 st.subheader("Job Logs")
                 st.text_area("Execution Logs", output["notebook_output"], height=300)
@@ -277,22 +199,6 @@ def show_results_section(config, run_id):
                 - 📋 **Job Runs**: Detailed execution logs
                 """)
                 
-                # Try to get results from DBFS
-                st.subheader("Next Steps")
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.markdown("**📈 View MLflow Experiments**")
-                    st.write("Go to Experiments → ML_Pipeline_...")
-                    
-                with col2:
-                    st.markdown("**📊 Check DBFS Results**")
-                    st.write("Go to Data → DBFS → FileStore → results")
-                    
-                with col3:
-                    st.markdown("**📋 View Job Details**")
-                    st.write("Go to Workflows → Jobs → Your Job")
-                    
         else:
             st.warning("Could not fetch job output. Check Databricks workspace for results.")
             
@@ -339,7 +245,12 @@ def main():
         
         st.markdown("---")
         st.header("📊 Dataset Info")
-        st.info("Upload a CSV file for analysis and modeling")
+        st.info("""
+        **Two-Step Process:**
+        1. Upload CSV file below
+        2. Run CLI command to upload to Databricks
+        3. Run ML Pipeline
+        """)
         
         # Display current configuration
         st.markdown("### Current Settings")
@@ -358,7 +269,7 @@ def main():
         uploaded_file = st.file_uploader(
             "Choose a CSV file",
             type=['csv'],
-            help="Upload your dataset in CSV format (any size supported)"
+            help="Upload your dataset in CSV format"
         )
         
         if uploaded_file is not None:
@@ -374,13 +285,26 @@ def main():
                 st.write(f"🎯 **Columns:** {len(df_preview.columns)}")
                 st.write(f"🔍 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:5])}...")
                 
+                # Save file and show CLI command
+                file_path = save_uploaded_file(uploaded_file)
+                if file_path:
+                    st.session_state.uploaded_file_path = file_path
+                    
+                    st.subheader("🚀 Upload to Databricks")
+                    st.info("Run this command in your terminal:")
+                    
+                    cli_command = f'databricks fs cp "{file_path}" "dbfs:/FileStore/uploads/{uploaded_file.name}"'
+                    st.code(cli_command, language="bash")
+                    
+                    st.success("✅ After running the CLI command, click 'Run ML Pipeline' below!")
+                
             except Exception as e:
                 st.error(f"Error reading file: {e}")
     
     with col2:
         st.header("🚀 Pipeline Controls")
         
-        if uploaded_file is not None:
+        if st.session_state.uploaded_file_path and uploaded_file is not None:
             # Display current configuration
             st.subheader("Pipeline Configuration")
             st.write(f"**Dataset:** {uploaded_file.name}")
@@ -390,7 +314,7 @@ def main():
             
             # Run pipeline button
             if st.button("🎯 Run ML Pipeline", type="primary", use_container_width=True):
-                run_pipeline(uploaded_file, selected_model, enable_tuning, test_size)
+                run_pipeline(st.session_state.uploaded_file_path, selected_model, enable_tuning, test_size)
             
             # Show status
             if st.session_state.job_status == 'running':
@@ -401,7 +325,7 @@ def main():
                 st.error("❌ Pipeline failed. Check Databricks logs for details.")
         
         else:
-            st.info("Please upload a CSV file to start the pipeline")
+            st.info("Please upload a CSV file first to get the CLI command")
 
 if __name__ == "__main__":
     main()
