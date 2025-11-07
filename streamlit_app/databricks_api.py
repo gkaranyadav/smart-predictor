@@ -1,4 +1,4 @@
-# databricks_api.py
+# databricks_api.py - COMPLETE UPDATED VERSION
 import streamlit as st
 import requests
 import base64
@@ -267,18 +267,38 @@ def run_job(job_id, job_params=None):
         return {"status": "error", "message": f"Unexpected error: {str(e)}"}
 
 # -------------------------------
-# 5️⃣ Get Job Output and Results
+# 5️⃣ Get Task Output for Multi-Task Jobs
 # -------------------------------
-def get_job_output(run_id):
+def get_task_output(run_id):
     """
-    Get the output and logs from a completed job run
+    Get output for a specific task run in multi-task jobs
     """
     try:
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
             
-        # Get run output
-        output_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/runs/get-output?run_id={run_id}"
+        # First, get the run details to find tasks
+        status_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/runs/get?run_id={run_id}"
+        status_response = requests.get(status_url, headers=HEADERS)
+        
+        if status_response.status_code != 200:
+            return {"status": "error", "message": f"Failed to get run details: {status_response.text}"}
+            
+        run_info = status_response.json()
+        tasks = run_info.get("tasks", [])
+        
+        if not tasks:
+            return {"status": "error", "message": "No tasks found in this job run"}
+        
+        # Get the first task (main notebook task)
+        main_task = tasks[0]
+        task_run_id = main_task.get("run_id")
+        
+        if not task_run_id:
+            return {"status": "error", "message": "No task run ID found"}
+            
+        # Now get output for this specific task
+        output_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/runs/get-output?run_id={task_run_id}"
         output_response = requests.get(output_url, headers=HEADERS)
         
         if output_response.status_code == 200:
@@ -288,13 +308,14 @@ def get_job_output(run_id):
                 "output": output_data,
                 "notebook_output": output_data.get("notebook_output", {}),
                 "logs": output_data.get("logs", ""),
-                "metadata": output_data.get("metadata", {})
+                "metadata": output_data.get("metadata", {}),
+                "task_run_id": task_run_id
             }
         else:
-            return {"status": "error", "message": f"Failed to get job output: {output_response.text}"}
+            return {"status": "error", "message": f"Failed to get task output: {output_response.text}"}
             
     except Exception as e:
-        return {"status": "error", "message": f"Error getting job output: {str(e)}"}
+        return {"status": "error", "message": f"Error getting task output: {str(e)}"}
 
 # -------------------------------
 # 6️⃣ Download file from DBFS
@@ -306,6 +327,14 @@ def dbfs_read_file(dbfs_path):
     try:
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
+            
+        # Remove 'dbfs:' prefix if present
+        if dbfs_path.startswith('dbfs:'):
+            dbfs_path = dbfs_path[5:]
+        
+        # Ensure path starts with '/'
+        if not dbfs_path.startswith('/'):
+            dbfs_path = '/' + dbfs_path
             
         url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs/read"
         payload = {
@@ -340,6 +369,14 @@ def dbfs_file_exists(dbfs_path):
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
             
+        # Remove 'dbfs:' prefix if present
+        if dbfs_path.startswith('dbfs:'):
+            dbfs_path = dbfs_path[5:]
+        
+        # Ensure path starts with '/'
+        if not dbfs_path.startswith('/'):
+            dbfs_path = '/' + dbfs_path
+            
         url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs/get-status"
         payload = {"path": dbfs_path}
         
@@ -360,8 +397,16 @@ def dbfs_list_files(directory_path):
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
             
-        # Use the correct API endpoint for workspace/files
-        url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/workspace/list"
+        # Remove 'dbfs:' prefix if present
+        if directory_path.startswith('dbfs:'):
+            directory_path = directory_path[5:]
+        
+        # Ensure path starts with '/'
+        if not directory_path.startswith('/'):
+            directory_path = '/' + directory_path
+            
+        # Use the correct API endpoint for DBFS list
+        url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs/list"
         payload = {
             "path": directory_path
         }
@@ -370,15 +415,15 @@ def dbfs_list_files(directory_path):
         
         if response.status_code == 200:
             data = response.json()
-            files = data.get("objects", [])
+            files = data.get("files", [])
             
             # Convert to the expected format
             formatted_files = []
             for file_info in files:
                 formatted_files.append({
                     "path": file_info["path"],
-                    "is_dir": file_info["object_type"] == "DIRECTORY",
-                    "file_size": file_info.get("size", 0)
+                    "is_dir": file_info["is_dir"],
+                    "file_size": file_info.get("file_size", 0)
                 })
             
             return {"status": "success", "files": formatted_files}
@@ -387,113 +432,3 @@ def dbfs_list_files(directory_path):
             
     except Exception as e:
         return {"status": "error", "message": f"Error listing files: {str(e)}"}
-
-# -------------------------------
-# 9️⃣ Get Task Runs for Multi-Task Jobs
-# -------------------------------
-def get_task_runs(run_id):
-    """
-    Get all task runs for a multi-task job
-    """
-    try:
-        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
-            return {"status": "error", "message": "Databricks credentials not configured"}
-            
-        # Get the run details first to see tasks
-        status_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/runs/get?run_id={run_id}"
-        status_response = requests.get(status_url, headers=HEADERS)
-        status_response.raise_for_status()
-        
-        run_info = status_response.json()
-        tasks = run_info.get("tasks", [])
-        
-        if not tasks:
-            return {"status": "error", "message": "No tasks found in this job run"}
-        
-        task_outputs = {}
-        for task in tasks:
-            task_run_id = task.get("run_id")
-            task_key = task.get("task_key", "unknown")
-            
-            if task_run_id:
-                # Get output for this specific task
-                output_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/runs/get-output?run_id={task_run_id}"
-                output_response = requests.get(output_url, headers=HEADERS)
-                
-                if output_response.status_code == 200:
-                    task_output = output_response.json()
-                    task_outputs[task_key] = {
-                        "run_id": task_run_id,
-                        "output": task_output
-                    }
-                else:
-                    task_outputs[task_key] = {
-                        "run_id": task_run_id,
-                        "error": f"Failed to get output: {output_response.text}"
-                    }
-        
-        return {
-            "status": "success", 
-            "task_outputs": task_outputs,
-            "run_info": run_info
-        }
-            
-    except Exception as e:
-        return {"status": "error", "message": f"Error getting task runs: {str(e)}"}
-
-# -------------------------------
-# 🔟 Get Specific Task Output
-# -------------------------------
-def get_task_output(task_run_id):
-    """
-    Get output for a specific task run
-    """
-    try:
-        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
-            return {"status": "error", "message": "Databricks credentials not configured"}
-            
-        output_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/runs/get-output?run_id={task_run_id}"
-        output_response = requests.get(output_url, headers=HEADERS)
-        
-        if output_response.status_code == 200:
-            output_data = output_response.json()
-            return {
-                "status": "success", 
-                "output": output_data,
-                "notebook_output": output_data.get("notebook_output", {}),
-                "logs": output_data.get("logs", ""),
-                "metadata": output_data.get("metadata", {})
-            }
-        else:
-            return {"status": "error", "message": f"Failed to get task output: {output_response.text}"}
-            
-    except Exception as e:
-        return {"status": "error", "message": f"Error getting task output: {str(e)}"}
-
-# -------------------------------
-# 1️⃣1️⃣ Get Run Details
-# -------------------------------
-def get_run_details(run_id):
-    """
-    Get detailed information about a job run
-    """
-    try:
-        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
-            return {"status": "error", "message": "Databricks credentials not configured"}
-            
-        status_url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.1/jobs/runs/get?run_id={run_id}"
-        status_response = requests.get(status_url, headers=HEADERS)
-        status_response.raise_for_status()
-        
-        run_info = status_response.json()
-        return {
-            "status": "success", 
-            "run_info": run_info,
-            "state": run_info.get("state", {}),
-            "tasks": run_info.get("tasks", []),
-            "start_time": run_info.get("start_time"),
-            "end_time": run_info.get("end_time")
-        }
-            
-    except Exception as e:
-        return {"status": "error", "message": f"Error getting run details: {str(e)}"}
