@@ -1,83 +1,112 @@
+# ===============================================================
+# 🚀 Streamlit + Databricks AutoML Pipeline UI
+# Upload CSV → DBFS → Run Unified Job → Show Insights
+# ===============================================================
+
 import streamlit as st
 import pandas as pd
-import base64
 import requests
-import json
 import io
 import time
+import json
+import base64
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
 
-# Read Databricks credentials
-DATABRICKS_HOST = st.secrets["DATABRICKS_HOST"]
-DATABRICKS_TOKEN = st.secrets["DATABRICKS_TOKEN"]
+# ---------------------------------------------------------------
+# 1️⃣ Databricks Config — Replace with your details
+# ---------------------------------------------------------------
+DATABRICKS_HOST = "https://dbc-484c2988-d6e6.cloud.databricks.com"  # your workspace URL
+DATABRICKS_TOKEN = "dapiYOUR_TOKEN_HERE"  # generate fresh token
+INGEST_TO_DELTA_JOB_ID = 1234  # replace with your actual job ID
 
-headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
-
-
-# ---------- Helper: Upload to DBFS ----------
+# ---------------------------------------------------------------
+# 2️⃣ Helper Functions
+# ---------------------------------------------------------------
 def upload_to_dbfs(file, dbfs_path):
-    content = file.read()
-    b64_content = base64.b64encode(content).decode("utf-8")
-
+    """Upload file to Databricks DBFS"""
     url = f"{DATABRICKS_HOST}/api/2.0/dbfs/put"
-    data = {"path": dbfs_path, "contents": b64_content, "overwrite": True}
-    resp = requests.post(url, headers=headers, json=data)
-    if resp.status_code == 200:
+    headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
+    data = {"path": dbfs_path, "overwrite": "true"}
+    files = {"contents": file.getvalue()}
+    response = requests.post(url, headers=headers, data=data, files=files)
+    if response.status_code == 200:
+        st.success(f"✅ Uploaded to DBFS: {dbfs_path}")
         return True
     else:
-        st.error(f"DBFS upload failed: {resp.text}")
+        st.error(f"❌ Upload failed: {response.text}")
         return False
 
 
-# ---------- Helper: Run Databricks Job ----------
-def run_job(job_name, params=None):
-    url = f"{DATABRICKS_HOST}/api/2.1/jobs/list"
-    jobs = requests.get(url, headers=headers).json()
-    job_id = None
-    for job in jobs.get("jobs", []):
-        if job["settings"]["name"] == job_name:
-            job_id = job["job_id"]
-            break
-    if not job_id:
-        st.error(f"Job '{job_name}' not found!")
+def run_databricks_job(job_id):
+    """Trigger Databricks job by job_id"""
+    url = f"{DATABRICKS_HOST}/api/2.1/jobs/run-now"
+    headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
+    data = {"job_id": job_id}
+    response = requests.post(url, headers=headers, json=data)
+    if response.status_code != 200:
+        st.error(f"❌ Failed to start job: {response.text}")
         return None
-
-    run_url = f"{DATABRICKS_HOST}/api/2.1/jobs/run-now"
-    payload = {"job_id": job_id, "notebook_params": params or {}}
-    run = requests.post(run_url, headers=headers, json=payload).json()
-    return run.get("run_id")
+    run_id = response.json().get("run_id")
+    st.info(f"🚀 Job started (Run ID: {run_id})")
+    return run_id
 
 
-# ---------- Streamlit UI ----------
+def get_job_status(run_id):
+    """Poll job status"""
+    url = f"{DATABRICKS_HOST}/api/2.1/jobs/runs/get?run_id={run_id}"
+    headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
+    while True:
+        time.sleep(8)
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            st.error("❌ Error checking job status")
+            return
+        state = response.json().get("state", {}).get("life_cycle_state", "")
+        result = response.json().get("state", {}).get("result_state", "")
+        st.write(f"⏳ Job Status: {state} ({result})")
+        if state == "TERMINATED":
+            st.success("✅ Job completed successfully!")
+            break
+
+
+def show_data_summary(uploaded_file):
+    """Show summary and correlation matrix"""
+    df = pd.read_csv(uploaded_file)
+    st.subheader("📊 Dataset Summary")
+    st.write(df.describe())
+    st.write("🔢 Shape:", df.shape)
+    st.write("📋 Columns:", list(df.columns))
+
+    st.subheader("🧩 Correlation Matrix")
+    corr = df.corr(numeric_only=True)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.heatmap(corr, cmap="coolwarm", annot=False, ax=ax)
+    st.pyplot(fig)
+
+
+# ---------------------------------------------------------------
+# 3️⃣ Streamlit UI
+# ---------------------------------------------------------------
+st.set_page_config(page_title="AutoML Pipeline", layout="wide")
 st.title("🚀 AutoML Pipeline (Streamlit + Databricks + MLflow)")
 
-uploaded = st.file_uploader("Upload CSV", type=["csv"])
-if uploaded:
-    df = pd.read_csv(uploaded)
-    st.dataframe(df.head())
+uploaded_file = st.file_uploader("📤 Upload CSV", type=["csv"])
 
-    dbfs_path = f"/FileStore/shared_uploads/{uploaded.name}"
-    st.info(f"Uploading to {dbfs_path} ...")
-    if upload_to_dbfs(uploaded, dbfs_path):
-        st.success("✅ Uploaded to DBFS!")
+if uploaded_file is not None:
+    st.write(f"File: {uploaded_file.name} ({round(len(uploaded_file.getvalue())/1e6,2)} MB)")
 
-        st.info("Running ingestion job...")
-        run_id = run_job("ingest_to_delta", {"input_path": dbfs_path})
+    dbfs_path = f"/FileStore/shared_uploads/{uploaded_file.name}"
+    st.write(f"Uploading to {dbfs_path} ...")
+
+    if upload_to_dbfs(uploaded_file, dbfs_path):
+        # ✅ Step 1: Run Databricks Unified Job
+        st.subheader("⚙️ Running Unified Job on Databricks...")
+        run_id = run_databricks_job(INGEST_TO_DELTA_JOB_ID)
+
         if run_id:
-            st.success(f"Ingestion started (Run ID: {run_id})")
+            get_job_status(run_id)
 
-        st.info("Running model training job...")
-        run_id = run_job("train_model", {"input_table": "default.input_data"})
-        if run_id:
-            st.success(f"Training started (Run ID: {run_id})")
-
-        st.info("Running batch scoring job...")
-        run_id = run_job("batch_score", {"input_path": dbfs_path})
-        if run_id:
-            st.success(f"Prediction started (Run ID: {run_id})")
-
-        # Show simple EDA
-        st.subheader("📊 Dataset Summary")
-        st.write(df.describe())
-        st.write("🧩 Correlation Matrix:")
-        st.dataframe(df.corr())
-
+        # ✅ Step 2: Show Data Summary
+        show_data_summary(uploaded_file)
