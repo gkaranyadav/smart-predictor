@@ -1,4 +1,4 @@
-# app.py - COMPLETE UPDATED VERSION
+# app.py - COMPLETE UPDATED VERSION WITH FIXED PREDICTION LOADING
 import streamlit as st
 import pandas as pd
 import time
@@ -64,100 +64,85 @@ if 'available_columns' not in st.session_state:
 if 'predictions_data' not in st.session_state:
     st.session_state.predictions_data = None
 
-# NEW: Debug function for prediction files
-def debug_prediction_files(session_id):
-    """Debug function to see what files actually exist"""
-    st.subheader("🐛 Debug File Search")
+# ENHANCED: Smart prediction loading with multiple fallbacks
+def enhanced_debug_prediction_files(session_id):
+    """Enhanced debug function to find prediction files"""
+    st.subheader("🔍 Enhanced File Debug")
     
-    base_path = f"/FileStore/results/{session_id}"
-    st.info(f"Looking in: {base_path}")
-    
-    # Try to read specific files directly first
-    file_paths = [
-        f"{base_path}/predictions_direct.csv",
-        f"{base_path}/predictions_sample.csv", 
-        f"{base_path}/prediction_summary.json",
-        f"{base_path}/prediction_stats.json"
+    # Try ALL possible path formats
+    base_paths = [
+        f"/FileStore/results/{session_id}",
+        f"dbfs:/FileStore/results/{session_id}",
+        f"/FileStore/tmp/{session_id}",
+        f"dbfs:/FileStore/tmp/{session_id}"
     ]
     
-    st.write("**Trying to read specific files:**")
-    for file_path in file_paths:
-        result = dbfs_read_file(file_path)
-        if result["status"] == "success":
-            st.success(f"✅ Found: {file_path}")
-            if file_path.endswith('.json'):
-                try:
-                    content = json.loads(result["content"])
-                    st.json(content)
-                except:
-                    st.text(result["content"][:500] + "...")
-            else:
-                st.text(f"File size: {len(result['content'])} bytes")
-        else:
-            st.error(f"❌ Not found: {file_path}")
+    found_files = []
     
-    # Then try to list directory
-    st.write("**Trying to list directory:**")
-    list_result = dbfs_list_files(base_path)
-    if list_result["status"] == "success":
-        files = list_result.get("files", [])
-        st.write(f"Found {len(files)} files/directories:")
-        for file_info in files:
-            st.write(f"- {file_info['path']} (is_dir: {file_info['is_dir']}, size: {file_info.get('file_size', 0)})")
-    else:
-        st.error(f"Could not list directory: {list_result['message']}")
-
-# NEW: Smart prediction loading functions
-def load_predictions_from_directory(directory_path):
-    """Load predictions from Spark output directory"""
-    try:
-        # List all files in the directory
-        files_result = dbfs_list_files(directory_path)
-        if files_result["status"] != "success":
-            return None
+    for base_path in base_paths:
+        st.write(f"**Checking:** `{base_path}`")
+        
+        # Try to list directory
+        list_result = dbfs_list_files(base_path)
+        if list_result["status"] == "success":
+            files = list_result.get("files", [])
+            st.success(f"✅ FOUND! {len(files)} files in {base_path}")
             
-        files = files_result.get("files", [])
-        if not files:
-            return None
-        
-        # Try different file patterns
-        file_patterns = [
-            f"{directory_path}/predictions_direct.csv",  # Direct CSV
-            f"{directory_path}/predictions_sample.csv",  # Sample CSV
-        ]
-        
-        # Also look for Spark part files
-        for file_info in files:
-            if "part-" in file_info["path"] and file_info["path"].endswith(".csv"):
-                file_patterns.append(file_info["path"])
-        
-        for file_path in file_patterns:
-            result = dbfs_read_file(file_path)
-            if result["status"] == "success":
-                try:
-                    df = pd.read_csv(io.StringIO(result["content"]))
-                    st.success(f"✅ Loaded predictions from: {file_path}")
-                    return df
-                except Exception as e:
-                    continue
-        
-        return None
-        
-    except Exception as e:
-        st.error(f"Error loading predictions: {str(e)}")
+            for file_info in files:
+                file_path = file_info['path']
+                file_size = file_info.get('file_size', 0)
+                st.write(f"- `{file_path}` (size: {file_size} bytes)")
+                
+                # Try to read CSV files
+                if file_path.endswith('.csv') and not file_info['is_dir']:
+                    file_result = dbfs_read_file(file_path)
+                    if file_result["status"] == "success":
+                        st.success(f"✅ CAN READ: {file_path}")
+                        try:
+                            df = pd.read_csv(io.StringIO(file_result["content"]))
+                            st.write(f"📊 Data: {len(df)} rows, {len(df.columns)} columns")
+                            st.dataframe(df.head(3))
+                            found_files.append({
+                                'path': file_path,
+                                'data': df,
+                                'size': file_size
+                            })
+                        except Exception as e:
+                            st.error(f"❌ Parse error: {e}")
+                    else:
+                        st.error(f"❌ Cannot read: {file_result['message']}")
+                elif file_path.endswith('.txt'):
+                    # Read success markers
+                    file_result = dbfs_read_file(file_path)
+                    if file_result["status"] == "success":
+                        st.info(f"📝 {file_path}: {file_result['content'][:100]}...")
+        else:
+            st.error(f"❌ Directory not found: {list_result['message']}")
+    
+    if found_files:
+        st.success(f"🎯 Found {len(found_files)} prediction files!")
+        return found_files[0]['data']  # Return first successful dataframe
+    else:
+        st.error("🚨 NO PREDICTION FILES FOUND IN ANY LOCATION!")
         return None
 
+# ENHANCED: Smart prediction loader
 def load_predictions_smart(session_id):
     """Smart prediction loader with multiple fallbacks"""
-    base_path = f"/FileStore/results/{session_id}"
+    st.info("🔍 Searching for prediction files...")
     
-    # Try multiple file locations in order of preference
-    file_paths = [
-        f"{base_path}/predictions_direct.csv",      # Primary - direct CSV
-        f"{base_path}/predictions_sample.csv",      # Secondary - sample
+    # Try multiple file patterns in order of preference
+    file_patterns = [
+        f"/FileStore/results/{session_id}/predictions.csv",
+        f"/FileStore/results/{session_id}/predictions_sample.csv",
+        f"/FileStore/results/{session_id}/predictions_simple.csv",
+        f"/FileStore/results/{session_id}/predictions_dbfs.csv",
+        f"/FileStore/results/{session_id}/predictions_relative.csv",
+        f"dbfs:/FileStore/results/{session_id}/predictions.csv",
+        f"dbfs:/FileStore/results/{session_id}/predictions_sample.csv",
     ]
     
-    for file_path in file_paths:
+    for file_path in file_patterns:
         result = dbfs_read_file(file_path)
         if result["status"] == "success":
             try:
@@ -165,37 +150,51 @@ def load_predictions_smart(session_id):
                 st.success(f"✅ Loaded from: {file_path}")
                 return df
             except Exception as e:
+                st.warning(f"⚠️ Could not parse {file_path}: {e}")
                 continue
     
-    # If direct files not found, try directory approach
-    return load_predictions_from_directory(base_path)
+    # If direct files not found, try enhanced debug
+    st.warning("⚠️ Direct file access failed. Starting enhanced search...")
+    return enhanced_debug_prediction_files(session_id)
 
+# ENHANCED: Display predictions
 def display_predictions(predictions_df, session_id):
     """Display predictions with download option"""
     if predictions_df is None or len(predictions_df) == 0:
+        st.error("❌ No predictions data to display")
         return False
         
     st.subheader("🎯 Prediction Results")
     
+    # Display basic info
+    st.write(f"**Total Predictions:** {len(predictions_df):,} rows")
+    st.write(f"**Columns:** {', '.join(predictions_df.columns.tolist())}")
+    
     # Display sample predictions
-    st.write("**Sample Predictions:**")
+    st.write("**Sample Predictions (first 10 rows):**")
     st.dataframe(predictions_df.head(10))
     
     # Show prediction distribution
     if 'prediction' in predictions_df.columns:
-        st.write("**Prediction Distribution:**")
-        pred_counts = predictions_df['prediction'].value_counts()
-        st.bar_chart(pred_counts)
+        col1, col2 = st.columns(2)
         
-        # Show prediction statistics
-        st.write("**Prediction Statistics:**")
-        st.write(f"Total predictions: {len(predictions_df):,}")
-        st.write(f"Unique predictions: {predictions_df['prediction'].nunique()}")
-        
-        # Show accuracy if we have actual values
-        if 'Diabetes_binary' in predictions_df.columns:
-            accuracy = (predictions_df['prediction'] == predictions_df['Diabetes_binary']).mean()
-            st.write(f"**Accuracy vs actual:** {accuracy:.4f}")
+        with col1:
+            st.write("**Prediction Distribution:**")
+            pred_counts = predictions_df['prediction'].value_counts()
+            st.bar_chart(pred_counts)
+            
+        with col2:
+            st.write("**Prediction Statistics:**")
+            st.write(f"Total predictions: {len(predictions_df):,}")
+            st.write(f"Unique predictions: {predictions_df['prediction'].nunique()}")
+            
+            # Show accuracy if we have actual values
+            if 'Diabetes_binary' in predictions_df.columns:
+                accuracy = (predictions_df['prediction'] == predictions_df['Diabetes_binary']).mean()
+                st.write(f"**Accuracy vs actual:** {accuracy:.4f}")
+            elif 'prediction_probability' in predictions_df.columns:
+                avg_prob = predictions_df['prediction_probability'].mean()
+                st.write(f"**Average confidence:** {avg_prob:.4f}")
     
     # Download button
     csv = predictions_df.to_csv(index=False)
@@ -518,9 +517,14 @@ elif page == "Batch Scoring":
             if st.button("🔄 Refresh Predictions", key="refresh_predictions"):
                 st.rerun()
         
-        # NEW: Add debug button
-        if st.button("🐛 Debug File Search"):
-            debug_prediction_files(st.session_state.session_id)
+        # ENHANCED: Add debug button
+        if st.button("🔍 Enhanced File Debug"):
+            predictions_df = enhanced_debug_prediction_files(st.session_state.session_id)
+            if predictions_df is not None:
+                st.session_state.predictions_data = predictions_df
+                display_success = display_predictions(predictions_df, st.session_state.session_id)
+                if display_success:
+                    st.balloons()
         
         # Display previous scoring results if available
         if st.session_state.scoring_results:
@@ -530,7 +534,7 @@ elif page == "Batch Scoring":
             # Try to load and display previous predictions
             st.info("🔄 Loading predictions...")
             
-            # NEW: Use smart prediction loader
+            # ENHANCED: Use smart prediction loader
             predictions_df = load_predictions_smart(st.session_state.session_id)
             
             # Display predictions if found
@@ -542,11 +546,10 @@ elif page == "Batch Scoring":
             else:
                 st.warning("📁 Predictions not found in automatic search.")
                 st.info("""
-                **Manual Access Instructions:**
-                1. Go to **Databricks Workspace** → **Data** → **DBFS**
-                2. Navigate to: `FileStore/results/{session_id}/`
-                3. Look for CSV files (may be in subdirectories)
-                4. Download and check the files manually
+                **Next Steps:**
+                1. Click the **🔍 Enhanced File Debug** button above to search all locations
+                2. Wait a few moments and click **🔄 Refresh Predictions**
+                3. Check Databricks workspace manually if needed
                 """)
         
         # Option to upload new data for scoring or use existing
@@ -604,9 +607,12 @@ elif page == "Batch Scoring":
                         st.write(f"**Predictions saved to:** {predictions_base_path}/")
                         st.write(f"**Run ID:** {result.get('run_id', 'N/A')}")
                         
-                        # Try to load predictions immediately
+                        # Wait a bit then try to load predictions
+                        st.info("⏳ Waiting for predictions to be saved...")
+                        time.sleep(5)
+                        
+                        # ENHANCED: Use smart prediction loader
                         st.info("🔍 Loading predictions...")
-                        # NEW: Use smart prediction loader
                         predictions_df = load_predictions_smart(st.session_state.session_id)
                         
                         if predictions_df is not None:
@@ -618,8 +624,8 @@ elif page == "Batch Scoring":
                             st.warning("⏳ Predictions are being processed...")
                             st.info("""
                             **Next Steps:**
-                            1. Wait a few moments and click the **🔄 Refresh Predictions** button above
-                            2. Predictions are being saved by Spark (this takes a moment)
+                            1. Wait 30 seconds and click the **🔄 Refresh Predictions** button
+                            2. Click **🔍 Enhanced File Debug** to search all locations
                             3. Your predictions will appear here automatically when ready
                             """)
                         
