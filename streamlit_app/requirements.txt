@@ -1,8 +1,10 @@
 streamlit
 pandas
-plotly
-requests
-tqdm
-python-dotenv
-mlflow
+numpy
+matplotlib
+seaborn
 scikit-learn
+requests
+mlflow
+databricks-api
+pyarrow
