@@ -74,9 +74,9 @@ def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_si
             "Content-Type": "application/json"
         }
         
-        # Job parameters
+        # Job parameters - USE YOUR ACTUAL JOB ID
         data = {
-            "job_id": 123456,  # We'll set this after creating the job
+            "job_id": 1076035793969694,  # ← YOUR JOB ID
             "notebook_params": {
                 "input_path": file_path,
                 "output_path": "/FileStore/results",
@@ -179,6 +179,9 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
         if status == "TERMINATED":
             status_text.success("✅ Pipeline completed successfully!")
             st.session_state.job_status = 'completed'
+            
+            # Show results section
+            show_results_section(config, run_id)
         else:
             status_text.error(f"❌ Pipeline ended with status: {status}")
             st.session_state.job_status = 'failed'
@@ -186,6 +189,33 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
     except Exception as e:
         st.error(f"❌ Error in pipeline: {e}")
         st.session_state.job_status = 'failed'
+
+def show_results_section(config, run_id):
+    """Display results from the completed job"""
+    try:
+        st.markdown("---")
+        st.header("📊 Results")
+        
+        # Get job output
+        url = f"{config['host']}/api/2.0/jobs/runs/get-output?run_id={run_id}"
+        headers = {"Authorization": f"Bearer {config['token']}"}
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            output = response.json()
+            
+            if "notebook_output" in output:
+                st.subheader("Job Output")
+                st.text(output["notebook_output"])
+            else:
+                st.info("Check Databricks workspace for detailed results and MLflow experiments")
+                
+        else:
+            st.warning("Could not fetch job output. Check Databricks workspace for results.")
+            
+    except Exception as e:
+        st.error(f"Error fetching results: {e}")
 
 def main():
     initialize_session_state()
@@ -198,29 +228,35 @@ def main():
         st.header("⚙️ Configuration")
         
         # Model selection
-        model_options = {
-            "Logistic Regression": "logistic",
-            "Random Forest": "random_forest", 
-            "XGBoost": "xgboost",
-            "LightGBM": "lightgbm",
-            "Neural Network": "neural_net"
-        }
+        model_options = [
+            "Logistic Regression",
+            "Random Forest", 
+            "XGBoost",
+            "LightGBM",
+            "Neural Network"
+        ]
         
         selected_model = st.selectbox(
             "Select Model",
-            options=list(model_options.keys()),
+            options=model_options,
             index=1
         )
         
         # Hyperparameter tuning option
         enable_tuning = st.checkbox("Enable Hyperparameter Tuning", value=False)
         
-        # Test size
+        # Test size - user selects from 10% to 40%
         test_size = st.slider("Test Set Size (%)", 10, 40, 20)
         
         st.markdown("---")
         st.header("📊 Dataset Info")
         st.info("Upload a CSV file for analysis and modeling")
+        
+        # Display current configuration
+        st.markdown("### Current Settings")
+        st.write(f"**Model:** {selected_model}")
+        st.write(f"**Test Size:** {test_size}%")
+        st.write(f"**Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
     
     # Main area
     col1, col2 = st.columns([1, 1])
@@ -244,7 +280,8 @@ def main():
                 
                 st.subheader("Dataset Info")
                 st.write(f"📏 **Shape:** {df_preview.shape}")
-                st.write(f"🎯 **Columns:** {', '.join(df_preview.columns.tolist())}")
+                st.write(f"🎯 **Columns:** {len(df_preview.columns)} columns")
+                st.write(f"📊 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:5])}...")
                 
             except Exception as e:
                 st.error(f"Error reading file: {e}")
@@ -253,6 +290,13 @@ def main():
         st.header("🚀 Pipeline Controls")
         
         if uploaded_file is not None:
+            # Display current configuration
+            st.subheader("Pipeline Configuration")
+            st.write(f"**Dataset:** {uploaded_file.name}")
+            st.write(f"**Model:** {selected_model}")
+            st.write(f"**Test Size:** {test_size}%")
+            st.write(f"**Tuning:** {'Enabled' if enable_tuning else 'Disabled'}")
+            
             # Run pipeline button
             if st.button("🎯 Run ML Pipeline", type="primary", use_container_width=True):
                 run_pipeline(uploaded_file, selected_model, enable_tuning, test_size)
@@ -267,6 +311,13 @@ def main():
         
         else:
             st.info("Please upload a CSV file to start the pipeline")
+            
+    # Display job history
+    if st.session_state.job_id:
+        st.sidebar.markdown("---")
+        st.sidebar.header("Job History")
+        st.sidebar.write(f"Last Job ID: `{st.session_state.job_id}`")
+        st.sidebar.write(f"Status: `{st.session_state.job_status}`")
 
 if __name__ == "__main__":
     main()
