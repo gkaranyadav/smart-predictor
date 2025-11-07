@@ -318,24 +318,23 @@ def get_task_output(run_id):
         return {"status": "error", "message": f"Error getting task output: {str(e)}"}
 
 # -------------------------------
-# 6️⃣ Download file from DBFS
+# 6️⃣ Download file from DBFS - FIXED VERSION
 # -------------------------------
 def dbfs_read_file(dbfs_path):
     """
-    Read a file from DBFS
+    Read a file from DBFS - FIXED API ENDPOINT
     """
     try:
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
             
-        # Remove 'dbfs:' prefix if present
+        # Remove 'dbfs:' prefix if present and ensure starts with '/'
         if dbfs_path.startswith('dbfs:'):
             dbfs_path = dbfs_path[5:]
-        
-        # Ensure path starts with '/'
         if not dbfs_path.startswith('/'):
             dbfs_path = '/' + dbfs_path
             
+        # ✅ CORRECT API ENDPOINT
         url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs/read"
         payload = {
             "path": dbfs_path,
@@ -391,21 +390,19 @@ def dbfs_file_exists(dbfs_path):
 # -------------------------------
 def dbfs_list_files(directory_path):
     """
-    List files in a DBFS directory - USING CORRECT API
+    List files in a DBFS directory - FIXED API ENDPOINT
     """
     try:
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             return {"status": "error", "message": "Databricks credentials not configured"}
             
-        # Remove 'dbfs:' prefix if present
+        # Remove 'dbfs:' prefix if present and ensure starts with '/'
         if directory_path.startswith('dbfs:'):
             directory_path = directory_path[5:]
-        
-        # Ensure path starts with '/'
         if not directory_path.startswith('/'):
             directory_path = '/' + directory_path
             
-        # Use the correct API endpoint for DBFS list
+        # ✅ CORRECT API ENDPOINT
         url = f"{DATABRICKS_HOST.rstrip('/')}/api/2.0/dbfs/list"
         payload = {
             "path": directory_path
