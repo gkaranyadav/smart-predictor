@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import json
 import time
-import boto3
+import base64
 from io import BytesIO
 
 # Page configuration
@@ -19,24 +19,10 @@ def initialize_session_state():
         st.session_state.job_status = 'not_started'
     if 'run_id' not in st.session_state:
         st.session_state.run_id = None
-    if 's3_file_path' not in st.session_state:
-        st.session_state.s3_file_path = None
+    if 'dbfs_file_path' not in st.session_state:
+        st.session_state.dbfs_file_path = None
     if 'uploaded_file' not in st.session_state:
         st.session_state.uploaded_file = None
-
-def get_aws_config():
-    """Get AWS configuration from secrets"""
-    try:
-        config = {
-            'aws_access_key': st.secrets["AWS"]["ACCESS_KEY_ID"],
-            'aws_secret_key': st.secrets["AWS"]["SECRET_ACCESS_KEY"],
-            's3_bucket': st.secrets["AWS"]["S3_BUCKET"],
-            'aws_region': st.secrets["AWS"]["REGION"]
-        }
-        return config
-    except Exception as e:
-        st.error(f"❌ Error loading AWS configuration: {e}")
-        return None
 
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
@@ -51,43 +37,51 @@ def get_databricks_config():
         st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
 
-def upload_to_s3(uploaded_file, aws_config):
-    """Upload file to your existing S3 bucket"""
+def upload_to_dbfs(uploaded_file, config):
+    """Upload file directly to DBFS"""
     try:
-        # Initialize S3 client with your credentials
-        s3_client = boto3.client(
-            's3',
-            aws_access_key_id=aws_config['aws_access_key'],
-            aws_secret_access_key=aws_config['aws_secret_key'],
-            region_name=aws_config['aws_region']
-        )
-        
         # Generate unique file name
         timestamp = int(time.time())
-        file_name = f"ml-pipeline-datasets/{timestamp}_{uploaded_file.name}"
-        s3_path = f"s3://{aws_config['s3_bucket']}/{file_name}"
+        file_name = f"{timestamp}_{uploaded_file.name}"
+        dbfs_path = f"/FileStore/ml_pipeline/{file_name}"
         
-        # Upload file to your existing bucket
-        with st.spinner(f"📤 Uploading {uploaded_file.name} to your S3 bucket..."):
-            # Reset file pointer
+        with st.spinner(f"📤 Uploading {uploaded_file.name} to DBFS..."):
+            # Read file content
             uploaded_file.seek(0)
+            file_content = uploaded_file.read()
             
-            s3_client.upload_fileobj(
-                uploaded_file,
-                aws_config['s3_bucket'],
-                file_name
-            )
-        
-        st.success(f"✅ File successfully uploaded to your S3 bucket!")
-        st.info(f"**S3 Path:** `{s3_path}`")
-        return s3_path
+            # Upload to DBFS using API
+            url = f"{config['host']}/api/2.0/dbfs/put"
+            headers = {
+                "Authorization": f"Bearer {config['token']}",
+                "Content-Type": "application/json"
+            }
+            
+            # Encode content to base64
+            encoded_content = base64.b64encode(file_content).decode('utf-8')
+            
+            data = {
+                "path": dbfs_path,
+                "contents": encoded_content,
+                "overwrite": True
+            }
+            
+            response = requests.post(url, headers=headers, json=data)
+            
+            if response.status_code == 200:
+                st.success(f"✅ File successfully uploaded to DBFS!")
+                st.info(f"**DBFS Path:** `dbfs:{dbfs_path}`")
+                return f"dbfs:{dbfs_path}"
+            else:
+                st.error(f"❌ DBFS upload failed: {response.text}")
+                return None
         
     except Exception as e:
-        st.error(f"❌ Error uploading to S3: {str(e)}")
+        st.error(f"❌ Error uploading to DBFS: {str(e)}")
         return None
 
-def trigger_databricks_job(config, s3_file_path, model_type, enable_tuning, test_size, aws_config):
-    """Trigger Databricks job via API with AWS keys"""
+def trigger_databricks_job(config, dbfs_file_path, model_type, enable_tuning, test_size):
+    """Trigger Databricks job via API without AWS keys"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
         
@@ -96,13 +90,11 @@ def trigger_databricks_job(config, s3_file_path, model_type, enable_tuning, test
             "Content-Type": "application/json"
         }
         
-        # Job parameters - include AWS keys for S3 access
+        # Job parameters - no AWS keys needed
         data = {
             "job_id": int(config['job_id']),
             "notebook_params": {
-                "s3_file_path": s3_file_path,
-                "aws_access_key": aws_config['aws_access_key'],
-                "aws_secret_key": aws_config['aws_secret_key'],
+                "dbfs_file_path": dbfs_file_path,  # Changed from s3_file_path
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
                 "test_size": str(test_size),
@@ -124,7 +116,7 @@ def trigger_databricks_job(config, s3_file_path, model_type, enable_tuning, test
         return None
 
 def get_job_status(config, run_id):
-    """Get job status"""
+    """Get job status (same as before)"""
     try:
         url = f"{config['host']}/api/2.0/jobs/runs/get?run_id={run_id}"
         
@@ -156,7 +148,7 @@ def get_job_status(config, run_id):
             "state_message": str(e)
         }
 
-def run_pipeline(s3_file_path, model_name, enable_tuning, test_size, aws_config):
+def run_pipeline(dbfs_file_path, model_name, enable_tuning, test_size):
     """Trigger the Databricks pipeline"""
     try:
         config = get_databricks_config()
@@ -179,7 +171,7 @@ def run_pipeline(s3_file_path, model_name, enable_tuning, test_size, aws_config)
         
         # Step 1: Trigger job
         status_text.info("🚀 Starting ML pipeline on Databricks...")
-        run_id = trigger_databricks_job(config, s3_file_path, model_code, enable_tuning, test_size, aws_config)
+        run_id = trigger_databricks_job(config, dbfs_file_path, model_code, enable_tuning, test_size)
         progress_bar.progress(30)
         
         if not run_id:
@@ -292,15 +284,10 @@ def main():
     initialize_session_state()
     
     st.title("🚀 Databricks ML Pipeline")
-    st.markdown("Upload your dataset and train ML models using your existing S3 bucket!")
+    st.markdown("Upload your dataset and train ML models using DBFS (No AWS required)!")
     
     # Check configurations
-    aws_config = get_aws_config()
     databricks_config = get_databricks_config()
-    
-    if not aws_config:
-        st.error("❌ AWS configuration missing.")
-        return
         
     if not databricks_config:
         st.error("❌ Databricks configuration missing.")
@@ -323,7 +310,7 @@ def main():
         
         st.markdown("---")
         st.header("📊 Current Setup")
-        st.success(f"✅ Using existing S3 bucket: **{aws_config['s3_bucket']}**")
+        st.success("✅ Using DBFS for file storage")
         st.write(f"**Model:** {selected_model}")
         st.write(f"**Test Size:** {test_size}%")
         st.write(f"**Tuning:** {'Yes' if enable_tuning else 'No'}")
@@ -337,10 +324,9 @@ def main():
         - Neural Network
         
         **Process:**
-        1. Upload CSV file
-        2. File uploaded to S3
-        3. Start ML Pipeline
-        4. View results
+        1. Upload CSV file to DBFS
+        2. Start ML Pipeline
+        3. View results
         """)
     
     # Main area
@@ -372,12 +358,12 @@ def main():
                 st.write(f"🎯 **Columns:** {len(df_preview.columns)}")
                 st.write(f"🔍 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:3])}...")
                 
-                # Upload to S3
-                if not st.session_state.s3_file_path:
-                    if st.button("📤 Upload to S3 Bucket", type="primary", use_container_width=True):
-                        s3_path = upload_to_s3(uploaded_file, aws_config)
-                        if s3_path:
-                            st.session_state.s3_file_path = s3_path
+                # Upload to DBFS
+                if not st.session_state.dbfs_file_path:
+                    if st.button("📤 Upload to DBFS", type="primary", use_container_width=True):
+                        dbfs_path = upload_to_dbfs(uploaded_file, databricks_config)
+                        if dbfs_path:
+                            st.session_state.dbfs_file_path = dbfs_path
                             st.rerun()
                 
             except Exception as e:
@@ -388,18 +374,18 @@ def main():
     with col2:
         st.header("🚀 Run ML Pipeline")
         
-        if st.session_state.s3_file_path:
-            st.success("✅ File uploaded to S3 successfully!")
-            st.info(f"**S3 Path:** `{st.session_state.s3_file_path}`")
+        if st.session_state.dbfs_file_path:
+            st.success("✅ File uploaded to DBFS successfully!")
+            st.info(f"**DBFS Path:** `{st.session_state.dbfs_file_path}`")
             
             st.write("**Pipeline Configuration:**")
             st.write(f"- **Model:** {selected_model}")
             st.write(f"- **Test Size:** {test_size}%")
             st.write(f"- **Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
-            st.write(f"- **S3 Bucket:** {aws_config['s3_bucket']}")
+            st.write(f"- **Storage:** DBFS (Databricks File System)")
             
             if st.button("🎯 Start ML Pipeline", type="primary", use_container_width=True):
-                run_pipeline(st.session_state.s3_file_path, selected_model, enable_tuning, test_size, aws_config)
+                run_pipeline(st.session_state.dbfs_file_path, selected_model, enable_tuning, test_size)
             
             # Show status
             if st.session_state.job_status == 'running':
@@ -410,7 +396,7 @@ def main():
                 st.error("❌ Pipeline failed.")
         
         elif st.session_state.uploaded_file is not None:
-            st.info("👆 Click 'Upload to S3 Bucket' to proceed")
+            st.info("👆 Click 'Upload to DBFS' to proceed")
         else:
             st.info("📁 Please upload a CSV file to begin")
 
