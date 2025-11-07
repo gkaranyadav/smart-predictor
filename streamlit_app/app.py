@@ -36,10 +36,14 @@ def get_databricks_config():
         return None
 
 def upload_file_chunk_to_dbfs(chunk_content, chunk_path, config):
-    """Upload a single file chunk to DBFS"""
+    """Upload a single file chunk to DBFS with detailed debugging"""
     try:
+        st.write(f"🔧 Debug: Uploading chunk to {chunk_path}")
+        st.write(f"🔧 Debug: Chunk size: {len(chunk_content)} bytes")
+        
         # Encode chunk content
         encoded_content = base64.b64encode(chunk_content).decode()
+        st.write(f"🔧 Debug: Encoded size: {len(encoded_content)} characters")
         
         # DBFS API endpoint
         url = f"{config['host']}/api/2.0/dbfs/put"
@@ -55,22 +59,33 @@ def upload_file_chunk_to_dbfs(chunk_content, chunk_path, config):
             "overwrite": True
         }
         
-        response = requests.post(url, headers=headers, json=data)
-        return response.status_code == 200
+        st.write("🔧 Debug: Sending request to Databricks...")
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        
+        st.write(f"🔧 Debug: Response status: {response.status_code}")
+        
+        if response.status_code == 200:
+            st.write("✅ Chunk upload successful!")
+            return True
+        else:
+            st.error(f"❌ Chunk upload failed with status {response.status_code}: {response.text}")
+            return False
         
     except Exception as e:
-        st.error(f"Error uploading chunk: {e}")
+        st.error(f"❌ Exception in chunk upload: {str(e)}")
         return False
 
 def split_and_upload_large_file(file_content, file_name, config):
     """Split large file into chunks and upload to DBFS"""
     try:
-        # Calculate chunk size (2.5MB to be safe under 10MB limit)
-        CHUNK_SIZE = 2 * 1024 * 1024  # 2MB in bytes
+        # Use smaller chunk size (1MB) to be extra safe
+        CHUNK_SIZE = 1 * 1024 * 1024  # 1MB in bytes
         
         # Split file content into chunks
         chunks = []
         total_chunks = (len(file_content) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        
+        st.write(f"📦 Splitting {len(file_content)/1024/1024:.2f}MB file into {total_chunks} chunks...")
         
         chunk_paths = []
         
@@ -87,10 +102,12 @@ def split_and_upload_large_file(file_content, file_name, config):
             chunk_path = f"/FileStore/uploads/{chunk_name}"
             
             status_text.info(f"📤 Uploading chunk {i+1}/{total_chunks}...")
+            st.write(f"Chunk {i+1} size: {len(chunk_content)/1024:.2f}KB")
             
             if upload_file_chunk_to_dbfs(chunk_content, chunk_path, config):
                 chunk_paths.append(f"dbfs:{chunk_path}")
                 progress_bar.progress((i + 1) / total_chunks)
+                st.success(f"✅ Chunk {i+1} uploaded successfully!")
             else:
                 st.error(f"❌ Failed to upload chunk {i+1}")
                 return None
@@ -175,6 +192,7 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
         progress_bar.progress(50)
         
         if not chunk_paths:
+            st.error("❌ File upload failed. Cannot proceed with pipeline.")
             return
         
         # Step 2: Trigger job
@@ -194,6 +212,7 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
         progress_bar.progress(75)
         
         if not run_id:
+            st.error("❌ Failed to trigger Databricks job.")
             return
         
         # Store in session state
