@@ -24,12 +24,24 @@ def initialize_session_state():
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
     try:
-        return {
+        # Debug: Show what secrets are available
+        st.sidebar.write("Available secrets:", list(st.secrets.keys()))
+        
+        config = {
             'host': st.secrets["DATABRICKS"]["HOST"].rstrip('/'),
-            'token': st.secrets["DATABRICKS"]["TOKEN"]
+            'token': st.secrets["DATABRICKS"]["TOKEN"],
+            'job_id': st.secrets["DATABRICKS"]["JOB_ID"]
         }
+        
+        st.sidebar.success("✅ Databricks config loaded!")
+        return config
+        
+    except KeyError as e:
+        st.sidebar.error(f"❌ Missing secret: {e}")
+        st.sidebar.info("Please check your Streamlit secrets configuration")
+        return None
     except Exception as e:
-        st.error(f"❌ Error loading Databricks configuration: {e}")
+        st.sidebar.error(f"❌ Error loading config: {e}")
         return None
 
 def upload_file_to_dbfs(file_content, file_name, config):
@@ -55,13 +67,14 @@ def upload_file_to_dbfs(file_content, file_name, config):
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code == 200:
+            st.sidebar.success("✅ File uploaded to DBFS!")
             return f"dbfs:/FileStore/uploads/{file_name}"
         else:
-            st.error(f"File upload failed: {response.text}")
+            st.error(f"❌ File upload failed: {response.text}")
             return None
             
     except Exception as e:
-        st.error(f"Error uploading file: {e}")
+        st.error(f"❌ Error uploading file: {e}")
         return None
 
 def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_size):
@@ -76,7 +89,7 @@ def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_si
         
         # Job parameters - USE YOUR ACTUAL JOB ID
         data = {
-            "job_id": 1076035793969694,  # ← YOUR JOB ID
+            "job_id": config['job_id'],  # ← FROM SECRETS
             "notebook_params": {
                 "input_path": file_path,
                 "output_path": "/FileStore/results",
@@ -89,13 +102,15 @@ def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_si
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code == 200:
-            return response.json()["run_id"]
+            run_id = response.json()["run_id"]
+            st.sidebar.success(f"✅ Job triggered! Run ID: {run_id}")
+            return run_id
         else:
-            st.error(f"Job trigger failed: {response.text}")
+            st.error(f"❌ Job trigger failed: {response.text}")
             return None
             
     except Exception as e:
-        st.error(f"Error triggering job: {e}")
+        st.error(f"❌ Error triggering job: {e}")
         return None
 
 def get_job_status(config, run_id):
@@ -122,6 +137,7 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
     try:
         config = get_databricks_config()
         if not config:
+            st.error("❌ Cannot start pipeline - Databricks configuration missing")
             return
         
         # Show progress
@@ -223,9 +239,16 @@ def main():
     st.title("🚀 Databricks ML Pipeline")
     st.markdown("Upload your dataset and train ML models on Databricks!")
     
+    # Check configuration first
+    config = get_databricks_config()
+    
     # Sidebar for configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
+        
+        if not config:
+            st.error("Please configure Databricks secrets in Streamlit Cloud")
+            return
         
         # Model selection
         model_options = [
@@ -257,6 +280,7 @@ def main():
         st.write(f"**Model:** {selected_model}")
         st.write(f"**Test Size:** {test_size}%")
         st.write(f"**Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
+        st.write(f"**Job ID:** {config['job_id']}")
     
     # Main area
     col1, col2 = st.columns([1, 1])
@@ -311,13 +335,6 @@ def main():
         
         else:
             st.info("Please upload a CSV file to start the pipeline")
-            
-    # Display job history
-    if st.session_state.job_id:
-        st.sidebar.markdown("---")
-        st.sidebar.header("Job History")
-        st.sidebar.write(f"Last Job ID: `{st.session_state.job_id}`")
-        st.sidebar.write(f"Status: `{st.session_state.job_status}`")
 
 if __name__ == "__main__":
     main()
