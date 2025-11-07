@@ -24,6 +24,8 @@ def initialize_session_state():
         st.session_state.results = None
     if 'uploaded_file_path' not in st.session_state:
         st.session_state.uploaded_file_path = None
+    if 'dbfs_file_path' not in st.session_state:
+        st.session_state.dbfs_file_path = None
 
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
@@ -50,7 +52,50 @@ def save_uploaded_file(uploaded_file):
         st.error(f"❌ Error saving file: {e}")
         return None
 
-def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_size):
+def upload_file_to_dbfs(config, local_file_path, filename):
+    """Upload file directly to DBFS using Databricks API"""
+    try:
+        # Read file content
+        with open(local_file_path, 'rb') as f:
+            content = f.read()
+        
+        # DBFS path
+        dbfs_path = f"/FileStore/uploads/{filename}"
+        full_dbfs_path = f"dbfs:{dbfs_path}"
+        
+        st.info(f"📤 Uploading {filename} to DBFS...")
+        
+        # Use the simpler single-call API approach
+        url = f"{config['host']}/api/2.0/dbfs/put"
+        
+        headers = {
+            "Authorization": f"Bearer {config['token']}",
+            "Content-Type": "application/json"
+        }
+        
+        # Convert content to base64
+        content_b64 = base64.b64encode(content).decode('utf-8')
+        
+        data = {
+            "path": dbfs_path,
+            "contents": content_b64,
+            "overwrite": True
+        }
+        
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            st.success(f"✅ File uploaded successfully to: {full_dbfs_path}")
+            return full_dbfs_path
+        else:
+            st.error(f"❌ Failed to upload file: {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"❌ Error uploading file to DBFS: {e}")
+        return None
+
+def trigger_databricks_job(config, dbfs_file_path, model_type, enable_tuning, test_size):
     """Trigger Databricks job via API"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
@@ -60,25 +105,25 @@ def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_si
             "Content-Type": "application/json"
         }
         
-        # CORRECT DBFS path format
-        dbfs_path = f"dbfs:/FileStore/uploads/{os.path.basename(file_path)}"
-        
         # Job parameters
         data = {
-            "job_id": config['job_id'],
+            "job_id": int(config['job_id']),
             "notebook_params": {
-                "input_path": dbfs_path,  # Single file path
-                "output_path": "/FileStore/results",
+                "input_path": dbfs_file_path,
+                "output_path": "dbfs:/FileStore/results",
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
                 "test_size": str(test_size)
             }
         }
         
+        st.info("🚀 Triggering Databricks job...")
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code == 200:
-            return response.json()["run_id"]
+            run_id = response.json()["run_id"]
+            st.success(f"✅ Job triggered successfully! Run ID: {run_id}")
+            return run_id
         else:
             st.error(f"❌ Job trigger failed: {response.text}")
             return None
@@ -99,14 +144,32 @@ def get_job_status(config, run_id):
         response = requests.get(url, headers=headers)
         
         if response.status_code == 200:
-            return response.json()["state"]["life_cycle_state"]
+            result = response.json()
+            state = result["state"]
+            return state["life_cycle_state"], state.get("result_state", "UNKNOWN"), state.get("state_message", "")
         else:
-            return "UNKNOWN"
+            return "UNKNOWN", "FAILED", f"API Error: {response.text}"
             
     except Exception as e:
-        return "ERROR"
+        return "ERROR", "FAILED", str(e)
 
-def run_pipeline(file_path, model_name, enable_tuning, test_size):
+def get_job_output(config, run_id):
+    """Get job output"""
+    try:
+        url = f"{config['host']}/api/2.0/jobs/runs/get-output?run_id={run_id}"
+        headers = {"Authorization": f"Bearer {config['token']}"}
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return None
+    except Exception as e:
+        st.error(f"Error fetching job output: {e}")
+        return None
+
+def run_pipeline(dbfs_file_path, model_name, enable_tuning, test_size):
     """Trigger the Databricks pipeline"""
     try:
         config = get_databricks_config()
@@ -118,9 +181,6 @@ def run_pipeline(file_path, model_name, enable_tuning, test_size):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Step 1: Trigger job with file path
-        status_text.info("🚀 Starting ML pipeline on Databricks...")
-        
         # Map model names to internal codes
         model_mapping = {
             "Logistic Regression": "logistic",
@@ -131,8 +191,11 @@ def run_pipeline(file_path, model_name, enable_tuning, test_size):
         }
         
         model_code = model_mapping[model_name]
-        run_id = trigger_databricks_job(config, file_path, model_code, enable_tuning, test_size)
-        progress_bar.progress(50)
+        
+        # Step 1: Trigger job
+        status_text.info("🚀 Starting ML pipeline on Databricks...")
+        run_id = trigger_databricks_job(config, dbfs_file_path, model_code, enable_tuning, test_size)
+        progress_bar.progress(30)
         
         if not run_id:
             st.error("❌ Failed to trigger Databricks job.")
@@ -145,27 +208,40 @@ def run_pipeline(file_path, model_name, enable_tuning, test_size):
         # Step 2: Poll for completion
         status_text.info("🔄 Pipeline running... This may take a few minutes.")
         
-        max_attempts = 60  # 5 minutes max
+        max_attempts = 120  # 10 minutes max (5 seconds per check)
         for attempt in range(max_attempts):
-            status = get_job_status(config, run_id)
+            life_cycle_state, result_state, message = get_job_status(config, run_id)
             
-            if status in ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"]:
+            # Update progress based on state
+            if life_cycle_state == "PENDING":
+                progress = 0.3 + (attempt / max_attempts) * 0.2
+            elif life_cycle_state == "RUNNING":
+                progress = 0.5 + (attempt / max_attempts) * 0.4
+            else:
+                progress = 0.9
+            
+            progress_bar.progress(min(progress, 0.9))
+            
+            # Display current status
+            status_text.info(f"🔄 Current status: {life_cycle_state} - {message}")
+            
+            if life_cycle_state in ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"]:
                 break
                 
-            progress = 0.50 + (attempt / max_attempts) * 0.45
-            progress_bar.progress(min(progress, 0.95))
             time.sleep(5)  # Wait 5 seconds between checks
         
         progress_bar.progress(1.0)
         
-        if status == "TERMINATED":
+        if life_cycle_state == "TERMINATED" and result_state == "SUCCESS":
             status_text.success("✅ Pipeline completed successfully!")
             st.session_state.job_status = 'completed'
             
             # Show results section
             show_results_section(config, run_id)
         else:
-            status_text.error(f"❌ Pipeline ended with status: {status}")
+            status_text.error(f"❌ Pipeline ended with status: {life_cycle_state} - {result_state}")
+            if message:
+                st.error(f"Error message: {message}")
             st.session_state.job_status = 'failed'
         
     except Exception as e:
@@ -179,19 +255,16 @@ def show_results_section(config, run_id):
         st.header("📊 Pipeline Results")
         
         # Get job output
-        url = f"{config['host']}/api/2.0/jobs/runs/get-output?run_id={run_id}"
-        headers = {"Authorization": f"Bearer {config['token']}"}
+        output = get_job_output(config, run_id)
         
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code == 200:
-            output = response.json()
-            
+        if output:
             if "notebook_output" in output and output["notebook_output"]:
                 st.subheader("Job Logs")
-                st.text_area("Execution Logs", output["notebook_output"], height=300)
+                st.text_area("Execution Logs", output["notebook_output"]["result"] if isinstance(output["notebook_output"], dict) else output["notebook_output"], height=300)
             else:
                 st.success("✅ Pipeline completed successfully!")
+                
+                # Show MLflow and DBFS links
                 st.info("""
                 **Check Databricks for detailed results:**
                 - 📈 **MLflow Experiments**: Model metrics and parameters
@@ -199,6 +272,38 @@ def show_results_section(config, run_id):
                 - 📋 **Job Runs**: Detailed execution logs
                 """)
                 
+                # Try to get results from DBFS
+                try:
+                    results_url = f"{config['host']}/api/2.0/dbfs/read"
+                    headers = {"Authorization": f"Bearer {config['token']}"}
+                    results_data = {
+                        "path": "/FileStore/results/results.json"
+                    }
+                    
+                    response = requests.get(results_url, headers=headers, json=results_data)
+                    if response.status_code == 200:
+                        results_content = base64.b64decode(response.json()["data"]).decode('utf-8')
+                        results = json.loads(results_content)
+                        
+                        if results.get("status") == "success":
+                            st.subheader("📈 Model Performance")
+                            metrics = results.get("metrics", {})
+                            
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Accuracy", f"{metrics.get('accuracy', 0):.4f}")
+                            with col2:
+                                st.metric("Precision", f"{metrics.get('precision', 0):.4f}")
+                            with col3:
+                                st.metric("Recall", f"{metrics.get('recall', 0):.4f}")
+                            with col4:
+                                st.metric("F1 Score", f"{metrics.get('f1_score', 0):.4f}")
+                            
+                            if "roc_auc" in metrics:
+                                st.metric("ROC AUC", f"{metrics.get('roc_auc', 0):.4f}")
+                except Exception as e:
+                    st.warning("Could not load detailed results from DBFS")
+                    
         else:
             st.warning("Could not fetch job output. Check Databricks workspace for results.")
             
@@ -220,6 +325,15 @@ def main():
         
         if not config:
             st.error("Please configure Databricks secrets in Streamlit Cloud")
+            st.info("""
+            **Required secrets in Streamlit Cloud:**
+            ```
+            [DATABRICKS]
+            HOST = "https://your-workspace.cloud.databricks.com"
+            TOKEN = "dapiyour-token"
+            JOB_ID = "1234567890"
+            ```
+            """)
             return
         
         # Model selection
@@ -246,9 +360,9 @@ def main():
         st.markdown("---")
         st.header("📊 Dataset Info")
         st.info("""
-        **Two-Step Process:**
-        1. Upload CSV file below
-        2. Run CLI command to upload to Databricks
+        **Process:**
+        1. Upload CSV file
+        2. File automatically uploaded to Databricks DBFS
         3. Run ML Pipeline
         """)
         
@@ -257,7 +371,6 @@ def main():
         st.write(f"**Model:** {selected_model}")
         st.write(f"**Test Size:** {test_size}%")
         st.write(f"**Hyperparameter Tuning:** {'Yes' if enable_tuning else 'No'}")
-        st.write(f"**Job ID:** {config['job_id']}")
     
     # Main area
     col1, col2 = st.columns([1, 1])
@@ -285,47 +398,52 @@ def main():
                 st.write(f"🎯 **Columns:** {len(df_preview.columns)}")
                 st.write(f"🔍 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:5])}...")
                 
-                # Save file and show CLI command
+                # Save file locally first
                 file_path = save_uploaded_file(uploaded_file)
                 if file_path:
                     st.session_state.uploaded_file_path = file_path
                     
-                    st.subheader("🚀 Upload to Databricks")
-                    st.info("Run this command in your terminal:")
-                    
-                    cli_command = f'databricks fs cp "{file_path}" "dbfs:/FileStore/uploads/{uploaded_file.name}"'
-                    st.code(cli_command, language="bash")
-                    
-                    st.success("✅ After running the CLI command, click 'Run ML Pipeline' below!")
+                    # Upload to DBFS
+                    if st.button("📤 Upload to Databricks DBFS", type="secondary"):
+                        with st.spinner("Uploading file to Databricks..."):
+                            dbfs_path = upload_file_to_dbfs(config, file_path, uploaded_file.name)
+                            if dbfs_path:
+                                st.session_state.dbfs_file_path = dbfs_path
+                                st.success("✅ Ready to run pipeline!")
                 
             except Exception as e:
                 st.error(f"Error reading file: {e}")
+        else:
+            st.info("👆 Please upload a CSV file to begin")
     
     with col2:
         st.header("🚀 Pipeline Controls")
         
-        if st.session_state.uploaded_file_path and uploaded_file is not None:
+        if st.session_state.dbfs_file_path:
             # Display current configuration
             st.subheader("Pipeline Configuration")
-            st.write(f"**Dataset:** {uploaded_file.name}")
+            st.write(f"**Dataset:** {os.path.basename(st.session_state.dbfs_file_path)}")
+            st.write(f"**DBFS Path:** `{st.session_state.dbfs_file_path}`")
             st.write(f"**Model:** {selected_model}")
             st.write(f"**Test Size:** {test_size}%")
             st.write(f"**Tuning:** {'Enabled' if enable_tuning else 'Disabled'}")
             
             # Run pipeline button
             if st.button("🎯 Run ML Pipeline", type="primary", use_container_width=True):
-                run_pipeline(st.session_state.uploaded_file_path, selected_model, enable_tuning, test_size)
+                run_pipeline(st.session_state.dbfs_file_path, selected_model, enable_tuning, test_size)
             
             # Show status
             if st.session_state.job_status == 'running':
                 st.info("🔄 Pipeline is running on Databricks...")
             elif st.session_state.job_status == 'completed':
-                st.success("✅ Pipeline completed! Check Databricks for results.")
+                st.success("✅ Pipeline completed! Check results above.")
             elif st.session_state.job_status == 'failed':
                 st.error("❌ Pipeline failed. Check Databricks logs for details.")
         
+        elif st.session_state.uploaded_file_path and not st.session_state.dbfs_file_path:
+            st.warning("⚠️ Please upload the file to Databricks DBFS first using the button above.")
         else:
-            st.info("Please upload a CSV file first to get the CLI command")
+            st.info("Please upload a CSV file and transfer it to Databricks DBFS")
 
 if __name__ == "__main__":
     main()
