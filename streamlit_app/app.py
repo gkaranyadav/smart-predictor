@@ -4,6 +4,7 @@ import requests
 import json
 import time
 import base64
+import io
 
 # Page configuration
 st.set_page_config(
@@ -24,31 +25,21 @@ def initialize_session_state():
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
     try:
-        # Debug: Show what secrets are available
-        st.sidebar.write("Available secrets:", list(st.secrets.keys()))
-        
         config = {
             'host': st.secrets["DATABRICKS"]["HOST"].rstrip('/'),
             'token': st.secrets["DATABRICKS"]["TOKEN"],
             'job_id': st.secrets["DATABRICKS"]["JOB_ID"]
         }
-        
-        st.sidebar.success("✅ Databricks config loaded!")
         return config
-        
-    except KeyError as e:
-        st.sidebar.error(f"❌ Missing secret: {e}")
-        st.sidebar.info("Please check your Streamlit secrets configuration")
-        return None
     except Exception as e:
-        st.sidebar.error(f"❌ Error loading config: {e}")
+        st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
 
-def upload_file_to_dbfs(file_content, file_name, config):
-    """Upload file to DBFS using Databricks API"""
+def upload_file_chunk_to_dbfs(chunk_content, chunk_path, config):
+    """Upload a single file chunk to DBFS"""
     try:
-        # Encode file content
-        encoded_content = base64.b64encode(file_content).decode()
+        # Encode chunk content
+        encoded_content = base64.b64encode(chunk_content).decode()
         
         # DBFS API endpoint
         url = f"{config['host']}/api/2.0/dbfs/put"
@@ -59,25 +50,59 @@ def upload_file_to_dbfs(file_content, file_name, config):
         }
         
         data = {
-            "path": f"/FileStore/uploads/{file_name}",
+            "path": chunk_path,
             "contents": encoded_content,
             "overwrite": True
         }
         
         response = requests.post(url, headers=headers, json=data)
+        return response.status_code == 200
         
-        if response.status_code == 200:
-            st.sidebar.success("✅ File uploaded to DBFS!")
-            return f"dbfs:/FileStore/uploads/{file_name}"
-        else:
-            st.error(f"❌ File upload failed: {response.text}")
-            return None
-            
     except Exception as e:
-        st.error(f"❌ Error uploading file: {e}")
+        st.error(f"Error uploading chunk: {e}")
+        return False
+
+def split_and_upload_large_file(file_content, file_name, config):
+    """Split large file into chunks and upload to DBFS"""
+    try:
+        # Calculate chunk size (2.5MB to be safe under 10MB limit)
+        CHUNK_SIZE = 2 * 1024 * 1024  # 2MB in bytes
+        
+        # Split file content into chunks
+        chunks = []
+        total_chunks = (len(file_content) + CHUNK_SIZE - 1) // CHUNK_SIZE
+        
+        chunk_paths = []
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i in range(total_chunks):
+            start_idx = i * CHUNK_SIZE
+            end_idx = min((i + 1) * CHUNK_SIZE, len(file_content))
+            chunk_content = file_content[start_idx:end_idx]
+            
+            # Upload this chunk
+            chunk_name = f"{file_name}_chunk_{i:03d}.csv"
+            chunk_path = f"/FileStore/uploads/{chunk_name}"
+            
+            status_text.info(f"📤 Uploading chunk {i+1}/{total_chunks}...")
+            
+            if upload_file_chunk_to_dbfs(chunk_content, chunk_path, config):
+                chunk_paths.append(f"dbfs:{chunk_path}")
+                progress_bar.progress((i + 1) / total_chunks)
+            else:
+                st.error(f"❌ Failed to upload chunk {i+1}")
+                return None
+        
+        status_text.success(f"✅ All {total_chunks} chunks uploaded successfully!")
+        return chunk_paths
+        
+    except Exception as e:
+        st.error(f"❌ Error splitting and uploading file: {e}")
         return None
 
-def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_size):
+def trigger_databricks_job(config, chunk_paths, model_type, enable_tuning, test_size):
     """Trigger Databricks job via API"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
@@ -87,11 +112,11 @@ def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_si
             "Content-Type": "application/json"
         }
         
-        # Job parameters - USE YOUR ACTUAL JOB ID
+        # Job parameters
         data = {
-            "job_id": config['job_id'],  # ← FROM SECRETS
+            "job_id": config['job_id'],
             "notebook_params": {
-                "input_path": file_path,
+                "chunk_paths": json.dumps(chunk_paths),  # Pass as JSON string
                 "output_path": "/FileStore/results",
                 "model_type": model_type,
                 "enable_tuning": str(enable_tuning).lower(),
@@ -102,9 +127,7 @@ def trigger_databricks_job(config, file_path, model_type, enable_tuning, test_si
         response = requests.post(url, headers=headers, json=data)
         
         if response.status_code == 200:
-            run_id = response.json()["run_id"]
-            st.sidebar.success(f"✅ Job triggered! Run ID: {run_id}")
-            return run_id
+            return response.json()["run_id"]
         else:
             st.error(f"❌ Job trigger failed: {response.text}")
             return None
@@ -144,13 +167,14 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Step 1: Upload file
-        status_text.info("📤 Uploading file to Databricks...")
+        # Step 1: Split and upload file in chunks
+        status_text.info("📤 Splitting and uploading file to Databricks...")
         file_content = uploaded_file.getvalue()
-        file_path = upload_file_to_dbfs(file_content, uploaded_file.name, config)
-        progress_bar.progress(25)
         
-        if not file_path:
+        chunk_paths = split_and_upload_large_file(file_content, uploaded_file.name, config)
+        progress_bar.progress(50)
+        
+        if not chunk_paths:
             return
         
         # Step 2: Trigger job
@@ -166,8 +190,8 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
         }
         
         model_code = model_mapping[model_name]
-        run_id = trigger_databricks_job(config, file_path, model_code, enable_tuning, test_size)
-        progress_bar.progress(50)
+        run_id = trigger_databricks_job(config, chunk_paths, model_code, enable_tuning, test_size)
+        progress_bar.progress(75)
         
         if not run_id:
             return
@@ -186,7 +210,7 @@ def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
             if status in ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"]:
                 break
                 
-            progress = 50 + (attempt / max_attempts) * 45
+            progress = 75 + (attempt / max_attempts) * 20
             progress_bar.progress(min(progress, 95))
             time.sleep(5)  # Wait 5 seconds between checks
         
@@ -292,7 +316,7 @@ def main():
         uploaded_file = st.file_uploader(
             "Choose a CSV file",
             type=['csv'],
-            help="Upload your dataset in CSV format"
+            help="Upload your dataset in CSV format (any size supported)"
         )
         
         if uploaded_file is not None:
@@ -304,8 +328,9 @@ def main():
                 
                 st.subheader("Dataset Info")
                 st.write(f"📏 **Shape:** {df_preview.shape}")
-                st.write(f"🎯 **Columns:** {len(df_preview.columns)} columns")
-                st.write(f"📊 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:5])}...")
+                st.write(f"📊 **File Size:** {len(uploaded_file.getvalue()) / (1024*1024):.2f} MB")
+                st.write(f"🎯 **Columns:** {len(df_preview.columns)}")
+                st.write(f"🔍 **Sample Columns:** {', '.join(df_preview.columns.tolist()[:5])}...")
                 
             except Exception as e:
                 st.error(f"Error reading file: {e}")
