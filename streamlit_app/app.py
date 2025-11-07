@@ -106,7 +106,7 @@ if uploaded_file is not None:
     if upload_to_dbfs(uploaded_file, dbfs_path):
         # ✅ Step 1: Run Databricks Unified Job
         st.subheader("⚙️ Running Unified Job on Databricks...")
-        run_id = run_databricks_job(INGEST_TO_DELTA_JOB_ID)
+        run_id = run_databricks_job(DATABRICKS_JOB_INGEST_ID)
 
         if run_id:
             get_job_status(run_id)
