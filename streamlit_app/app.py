@@ -1,115 +1,142 @@
-# ===============================================================
-# 🚀 Streamlit + Databricks AutoML Pipeline UI
-# Upload CSV → DBFS → Run Unified Job → Show Insights
-# ===============================================================
-
 import streamlit as st
 import pandas as pd
 import requests
-import io
-import time
 import json
-import base64
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
+import time
+import os
+from datetime import datetime
 
-# ---------------------------------------------------------------
-# 1️⃣ Databricks Config — Replace with your details
-# ---------------------------------------------------------------
+# Page configuration
+st.set_page_config(
+    page_title="Databricks ML Pipeline", 
+    layout="wide",
+    page_icon="🚀"
+)
 
-DATABRICKS_HOST = st.secrets["DATABRICKS_HOST"]
-DATABRICKS_TOKEN = st.secrets["DATABRICKS_TOKEN"]
-DATABRICKS_JOB_INGEST_ID = st.secrets["DATABRICKS_JOB_INGEST_ID"]
-DATABRICKS_JOB_TRAIN_ID = st.secrets["DATABRICKS_JOB_TRAIN_ID"]
-DATABRICKS_JOB_SCORE_ID = st.secrets["DATABRICKS_JOB_SCORE_ID"]
+def initialize_session_state():
+    """Initialize session state variables"""
+    if 'job_status' not in st.session_state:
+        st.session_state.job_status = 'not_started'
+    if 'job_id' not in st.session_state:
+        st.session_state.job_id = None
+    if 'results' not in st.session_state:
+        st.session_state.results = None
 
-# ---------------------------------------------------------------
-# 2️⃣ Helper Functions
-# ---------------------------------------------------------------
-def upload_to_dbfs(file, dbfs_path):
-    """Upload file to Databricks DBFS"""
-    url = f"{DATABRICKS_HOST}/api/2.0/dbfs/put"
-    headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
-    data = {"path": dbfs_path, "overwrite": "true"}
-    files = {"contents": file.getvalue()}
-    response = requests.post(url, headers=headers, data=data, files=files)
-    if response.status_code == 200:
-        st.success(f"✅ Uploaded to DBFS: {dbfs_path}")
-        return True
-    else:
-        st.error(f"❌ Upload failed: {response.text}")
-        return False
-
-
-def run_databricks_job(job_id):
-    """Trigger Databricks job by job_id"""
-    url = f"{DATABRICKS_HOST}/api/2.1/jobs/run-now"
-    headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
-    data = {"job_id": job_id}
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code != 200:
-        st.error(f"❌ Failed to start job: {response.text}")
+def get_databricks_config():
+    """Get Databricks configuration from secrets"""
+    try:
+        return {
+            'host': st.secrets["DATABRICKS"]["HOST"],
+            'token': st.secrets["DATABRICKS"]["TOKEN"]
+        }
+    except Exception as e:
+        st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
-    run_id = response.json().get("run_id")
-    st.info(f"🚀 Job started (Run ID: {run_id})")
-    return run_id
 
+def main():
+    initialize_session_state()
+    
+    st.title("🚀 Databricks ML Pipeline")
+    st.markdown("Upload your dataset and train ML models on Databricks!")
+    
+    # Sidebar for configuration
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        
+        # Model selection
+        model_options = {
+            "Logistic Regression": "logistic",
+            "Random Forest": "random_forest", 
+            "XGBoost": "xgboost",
+            "LightGBM": "lightgbm",
+            "Neural Network": "neural_net"
+        }
+        
+        selected_model = st.selectbox(
+            "Select Model",
+            options=list(model_options.keys()),
+            index=1
+        )
+        
+        # Hyperparameter tuning option
+        enable_tuning = st.checkbox("Enable Hyperparameter Tuning", value=False)
+        
+        # Test size
+        test_size = st.slider("Test Set Size (%)", 10, 40, 20)
+        
+        st.markdown("---")
+        st.markswith st.sidebar:
+        st.header("📊 Dataset Info")
+        st.info("Upload a CSV file for analysis and modeling")
+    
+    # Main area
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.header("📁 Data Upload")
+        
+        # File upload
+        uploaded_file = st.file_uploader(
+            "Choose a CSV file",
+            type=['csv'],
+            help="Upload your dataset in CSV format"
+        )
+        
+        if uploaded_file is not None:
+            # Preview data
+            try:
+                df_preview = pd.read_csv(uploaded_file, nrows=5)
+                st.subheader("Data Preview")
+                st.dataframe(df_preview)
+                
+                st.subheader("Dataset Info")
+                st.write(f"📏 **Shape:** {df_preview.shape}")
+                st.write(f"🎯 **Columns:** {', '.join(df_preview.columns.tolist())}")
+                
+            except Exception as e:
+                st.error(f"Error reading file: {e}")
+    
+    with col2:
+        st.header("🚀 Pipeline Controls")
+        
+        if uploaded_file is not None:
+            # Run pipeline button
+            if st.button("🎯 Run ML Pipeline", type="primary", use_container_width=True):
+                run_pipeline(uploaded_file, selected_model, enable_tuning, test_size)
+            
+            # Show status if job is running
+            if st.session_state.job_status == 'running':
+                with st.container():
+                    st.info("🔄 Pipeline is running on Databricks...")
+                    progress_bar = st.progress(0)
+                    
+                    # Simulate progress (we'll replace with actual polling)
+                    for i in range(100):
+                        time.sleep(0.1)
+                        progress_bar.progress(i + 1)
+                    
+                    st.success("✅ Pipeline completed!")
+        
+        else:
+            st.info("Please upload a CSV file to start the pipeline")
 
-def get_job_status(run_id):
-    """Poll job status"""
-    url = f"{DATABRICKS_HOST}/api/2.1/jobs/runs/get?run_id={run_id}"
-    headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
-    while True:
-        time.sleep(8)
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            st.error("❌ Error checking job status")
+def run_pipeline(uploaded_file, model_name, enable_tuning, test_size):
+    """Trigger the Databricks pipeline"""
+    try:
+        config = get_databricks_config()
+        if not config:
             return
-        state = response.json().get("state", {}).get("life_cycle_state", "")
-        result = response.json().get("state", {}).get("result_state", "")
-        st.write(f"⏳ Job Status: {state} ({result})")
-        if state == "TERMINATED":
-            st.success("✅ Job completed successfully!")
-            break
+        
+        # For now, just show a message
+        st.session_state.job_status = 'running'
+        st.info(f"🚀 Starting pipeline with {model_name}...")
+        
+        # TODO: Implement Databricks API calls
+        st.warning("Databricks integration will be implemented in next step")
+        
+    except Exception as e:
+        st.error(f"❌ Error starting pipeline: {e}")
+        st.session_state.job_status = 'failed'
 
-
-def show_data_summary(uploaded_file):
-    """Show summary and correlation matrix"""
-    df = pd.read_csv(uploaded_file)
-    st.subheader("📊 Dataset Summary")
-    st.write(df.describe())
-    st.write("🔢 Shape:", df.shape)
-    st.write("📋 Columns:", list(df.columns))
-
-    st.subheader("🧩 Correlation Matrix")
-    corr = df.corr(numeric_only=True)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    sns.heatmap(corr, cmap="coolwarm", annot=False, ax=ax)
-    st.pyplot(fig)
-
-
-# ---------------------------------------------------------------
-# 3️⃣ Streamlit UI
-# ---------------------------------------------------------------
-st.set_page_config(page_title="AutoML Pipeline", layout="wide")
-st.title("🚀 AutoML Pipeline (Streamlit + Databricks + MLflow)")
-
-uploaded_file = st.file_uploader("📤 Upload CSV", type=["csv"])
-
-if uploaded_file is not None:
-    st.write(f"File: {uploaded_file.name} ({round(len(uploaded_file.getvalue())/1e6,2)} MB)")
-
-    dbfs_path = f"/FileStore/shared_uploads/{uploaded_file.name}"
-    st.write(f"Uploading to {dbfs_path} ...")
-
-    if upload_to_dbfs(uploaded_file, dbfs_path):
-        # ✅ Step 1: Run Databricks Unified Job
-        st.subheader("⚙️ Running Unified Job on Databricks...")
-        run_id = run_databricks_job(DATABRICKS_JOB_INGEST_ID)
-
-        if run_id:
-            get_job_status(run_id)
-
-        # ✅ Step 2: Show Data Summary
-        show_data_summary(uploaded_file)
+if __name__ == "__main__":
+    main()
