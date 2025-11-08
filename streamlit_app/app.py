@@ -6,13 +6,86 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
+from datetime import datetime
 
-# Page configuration
+# Page configuration - UNIVERSAL PROFESSIONAL THEME
 st.set_page_config(
-    page_title="Smart Predictor - Auto ML Platform", 
+    page_title="Smart Predictor - Universal Auto ML", 
     layout="wide",
-    page_icon="🚀"
+    page_icon="🚀",
+    initial_sidebar_state="expanded"
 )
+
+# Custom CSS for Professional Universal Theme
+st.markdown("""
+<style>
+    /* Main Theme - Universal Professional */
+    .main-header {
+        font-size: 2.5rem;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 1rem;
+        font-weight: 700;
+    }
+    
+    .sub-header {
+        font-size: 1.2rem;
+        color: #2e86ab;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    
+    /* Card Styling */
+    .card {
+        background: white;
+        padding: 1.5rem;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        border-left: 4px solid #1f77b4;
+        margin-bottom: 1rem;
+    }
+    
+    .metric-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 1rem;
+        border-radius: 10px;
+        text-align: center;
+    }
+    
+    /* Button Styling */
+    .stButton button {
+        background: linear-gradient(135deg, #1f77b4 0%, #2e86ab 100%);
+        color: white;
+        border: none;
+        padding: 0.5rem 2rem;
+        border-radius: 25px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 12px rgba(31, 119, 180, 0.3);
+    }
+    
+    /* Toggle Switch Styling */
+    .stCheckbox label {
+        font-weight: 600;
+        color: #1f77b4;
+    }
+    
+    /* Progress Bar */
+    .stProgress > div > div > div {
+        background: linear-gradient(90deg, #1f77b4 0%, #2e86ab 100%);
+    }
+    
+    /* Sidebar Styling */
+    .css-1d391kg {
+        background: #f8f9fa;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 def initialize_session_state():
     """Initialize session state variables"""
@@ -22,6 +95,11 @@ def initialize_session_state():
         st.session_state.run_id = None
     if 'auto_ml_results' not in st.session_state:
         st.session_state.auto_ml_results = None
+    if 'pipeline_config' not in st.session_state:
+        st.session_state.pipeline_config = {
+            'enable_tuning': False,
+            'use_ai_assist': True
+        }
 
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
@@ -36,8 +114,8 @@ def get_databricks_config():
         st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
 
-def trigger_databricks_job(config):
-    """Trigger Databricks Auto-ML job"""
+def trigger_databricks_job(config, pipeline_config):
+    """Trigger Databricks Auto-ML job with configuration"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
         
@@ -47,7 +125,11 @@ def trigger_databricks_job(config):
         }
         
         data = {
-            "job_id": int(config['job_id'])
+            "job_id": int(config['job_id']),
+            "notebook_params": {
+                "enable_tuning": str(pipeline_config['enable_tuning']).lower(),
+                "use_ai_assist": str(pipeline_config['use_ai_assist']).lower()
+            }
         }
         
         response = requests.post(url, headers=headers, json=data)
@@ -97,18 +179,26 @@ def get_job_status(config, run_id):
         }
 
 def run_auto_ml_pipeline():
-    """Trigger the Auto-ML pipeline"""
+    """Trigger the Auto-ML pipeline with user configuration"""
     try:
         config = get_databricks_config()
         if not config:
             st.error("❌ Cannot start pipeline - Databricks configuration missing")
             return
         
+        # Show configuration summary
+        st.info(f"⚙️ **Pipeline Configuration:**")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write(f"🤖 AI Assistance: {'✅ Enabled' if st.session_state.pipeline_config['use_ai_assist'] else '❌ Disabled'}")
+        with col2:
+            st.write(f"🔧 Hyperparameter Tuning: {'✅ Enabled' if st.session_state.pipeline_config['enable_tuning'] else '❌ Disabled'}")
+        
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        status_text.info("🚀 Starting Auto-ML Pipeline on Databricks...")
-        run_id = trigger_databricks_job(config)
+        status_text.info("🚀 Starting Enhanced Auto-ML Pipeline on Databricks...")
+        run_id = trigger_databricks_job(config, st.session_state.pipeline_config)
         progress_bar.progress(20)
         
         if not run_id:
@@ -130,7 +220,7 @@ def run_auto_ml_pipeline():
                 status_text.info("⏳ Job queued...")
             elif life_cycle_state == "RUNNING":
                 progress = 0.5 + (attempt / max_attempts) * 0.4
-                status_text.info("🤖 Auto-ML: Detecting target, preprocessing, training models...")
+                status_text.info("🤖 Auto-ML: Smart target detection, enhanced EDA, model training...")
             else:
                 progress = 0.9
             
@@ -144,7 +234,7 @@ def run_auto_ml_pipeline():
         progress_bar.progress(1.0)
         
         if life_cycle_state == "TERMINATED" and status_info["result_state"] == "SUCCESS":
-            status_text.success("✅ Auto-ML Pipeline completed successfully!")
+            status_text.success("✅ Enhanced Auto-ML Pipeline completed successfully!")
             st.session_state.job_status = 'completed'
             load_and_display_results(config)
         else:
@@ -174,69 +264,197 @@ def load_and_display_results(config):
     except Exception as e:
         st.error(f"Error loading results: {e}")
 
-def display_data_analyst_dashboard(results):
-    """Display comprehensive data analyst dashboard"""
-    st.header("📊 Data Analyst Dashboard")
+def create_enhanced_eda_visualizations(results):
+    """Create enhanced EDA visualizations"""
+    try:
+        # Target Distribution
+        if 'dataset_info' in results and 'target_distribution' in results['dataset_info']:
+            dist_data = results['dataset_info']['target_distribution']
+            if isinstance(dist_data, str):
+                dist_data = json.loads(dist_data.replace("'", '"'))
+            
+            if dist_data:
+                # Create beautiful pie chart
+                fig_pie = px.pie(
+                    values=list(dist_data.values()),
+                    names=[f"Class {k}" for k in dist_data.keys()],
+                    title="🎯 Target Distribution",
+                    color_discrete_sequence=px.colors.sequential.Blues_r
+                )
+                fig_pie.update_traces(
+                    textposition='inside',
+                    textinfo='percent+label',
+                    marker=dict(line=dict(color='#000000', width=2))
+                )
+                fig_pie.update_layout(
+                    height=400,
+                    showlegend=True
+                )
+                return fig_pie
+    except Exception as e:
+        st.warning(f"Could not create EDA visualization: {e}")
+    return None
+
+def create_feature_importance_chart(feature_importance):
+    """Create colorful feature importance chart"""
+    if not feature_importance:
+        return None
     
-    # Dataset Overview
+    try:
+        # Get top 10 features
+        features = list(feature_importance.keys())[:10]
+        importance = list(feature_importance.values())[:10]
+        
+        # Create colorful horizontal bar chart
+        fig = px.bar(
+            x=importance,
+            y=features,
+            orientation='h',
+            title="🔍 Top 10 Feature Importance",
+            color=importance,
+            color_continuous_scale='viridis'
+        )
+        
+        fig.update_layout(
+            xaxis_title="Importance Score",
+            yaxis_title="Features",
+            showlegend=False,
+            height=400,
+            yaxis={'categoryorder':'total ascending'}
+        )
+        
+        fig.update_traces(
+            marker_line_color='black',
+            marker_line_width=1,
+            hovertemplate='<b>%{y}</b><br>Importance: %{x:.4f}<extra></extra>'
+        )
+        
+        return fig
+    except Exception as e:
+        st.warning(f"Could not create feature importance chart: {e}")
+        return None
+
+def display_enhanced_analytics_dashboard(results):
+    """Display comprehensive enhanced analytics dashboard"""
+    
+    # Header with gradient
+    st.markdown('<div class="main-header">📊 Universal Analytics Dashboard</div>', unsafe_allow_html=True)
+    
+    # Dataset Overview Cards
+    st.subheader("📈 Dataset Overview")
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Samples", f"{results.get('dataset_info', {}).get('rows', 0):,}")
-    with col2:
-        st.metric("Features", results.get('dataset_info', {}).get('features', 0))
-    with col3:
-        st.metric("Target Variable", results.get('target_column', 'N/A'))
-    with col4:
-        st.metric("Problem Type", results.get('problem_type', 'N/A').replace('_', ' ').title())
     
-    # Data Quality & EDA Section
-    st.subheader("🔍 Data Quality & EDA")
+    with col1:
+        st.markdown(f"""
+        <div class="metric-card">
+            <h3>Total Samples</h3>
+            <h2>{results.get('dataset_info', {}).get('rows', 0):,}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div class="metric-card">
+            <h3>Features</h3>
+            <h2>{results.get('dataset_info', {}).get('features', 0)}</h2>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+        <div class="metric-card">
+            <h3>Target</h3>
+            <h4>{results.get('target_column', 'N/A')}</h4>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        problem_type = results.get('problem_type', 'N/A').replace('_', ' ').title()
+        st.markdown(f"""
+        <div class="metric-card">
+            <h3>Problem Type</h3>
+            <h4>{problem_type}</h4>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # AI Insights Section
+    if results.get('ai_insights'):
+        st.markdown("---")
+        st.subheader("💬 AI Insights & Recommendations")
+        st.info(f"**🤖 SMART ANALYSIS:** {results['ai_insights']}")
+    
+    # Enhanced EDA Section
+    st.markdown("---")
+    st.subheader("🔍 Enhanced Data Analysis")
+    
     col1, col2 = st.columns(2)
     
     with col1:
-        st.info("**✅ Data Quality Check**")
-        st.write("• Automatic missing value handling")
-        st.write("• Categorical encoding applied")
-        st.write("• Data type validation complete")
-        st.write("• Feature scaling performed")
-    
-    with col2:
-        st.info("**📈 EDA Insights**")
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("✅ Data Quality Report")
+        
+        # Enhanced EDA Insights
         problem_type = results.get('problem_type', '')
         if problem_type == 'binary_classification':
-            st.write("• Binary classification problem")
-            st.write("• Perfect for medical diagnosis")
-            st.write("• Model interpretability high")
+            st.write("• **Binary Classification** detected")
+            st.write("• Perfect for yes/no predictions")
+            st.write("• Model interpretability: High")
+            st.write("• Business impact: Direct decision support")
         elif problem_type == 'multiclass_classification':
-            st.write("• Multi-class classification")
-            st.write("• Multiple outcome categories")
+            st.write("• **Multi-class Classification** detected")  
+            st.write("• Multiple category prediction")
             st.write("• Balanced accuracy important")
+            st.write("• Use case: Categorization systems")
+        elif problem_type == 'regression':
+            st.write("• **Regression** problem detected")
+            st.write("• Predicting continuous values")
+            st.write("• R² score interpretation key")
+            st.write("• Use case: Forecasting, pricing")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.subheader("📊 EDA Visualizations")
+        
+        # Interactive EDA Chart
+        eda_chart = create_enhanced_eda_visualizations(results)
+        if eda_chart:
+            st.plotly_chart(eda_chart, use_container_width=True)
+        else:
+            st.info("🎯 Target distribution analysis available after pipeline execution")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
     
     # Model Performance Comparison
+    st.markdown("---")
     st.subheader("🎯 Model Performance Comparison")
     
     if 'model_comparison' in results:
         model_metrics = results['model_comparison']
         
-        # Create metrics comparison
+        # Create interactive metrics comparison
         metrics_data = []
         for model_name, metrics in model_metrics.items():
             if 'error' not in metrics:
+                model_display_name = model_name.replace('_', ' ').title()
+                
                 if results.get('problem_type') != 'regression':
                     metrics_data.append({
-                        'Model': model_name.replace('_', ' ').title(),
+                        'Model': model_display_name,
                         'Accuracy': f"{metrics.get('accuracy', 0):.4f}",
                         'Precision': f"{metrics.get('precision', 0):.4f}",
                         'Recall': f"{metrics.get('recall', 0):.4f}",
                         'F1 Score': f"{metrics.get('f1_score', 0):.4f}",
-                        'ROC AUC': f"{metrics.get('roc_auc', 0):.4f}" if 'roc_auc' in metrics else 'N/A'
+                        'ROC AUC': f"{metrics.get('roc_auc', 'N/A')}"
                     })
                 else:
                     metrics_data.append({
-                        'Model': model_name.replace('_', ' ').title(),
+                        'Model': model_display_name,
                         'R² Score': f"{metrics.get('r2', 0):.4f}",
                         'RMSE': f"{metrics.get('rmse', 0):.4f}",
-                        'MAE': f"{metrics.get('mae', 0):.4f}"
+                        'MAE': f"{metrics.get('mae', 0):.4f}",
+                        'MSE': f"{metrics.get('mse', 0):.4f}"
                     })
         
         if metrics_data:
@@ -246,114 +464,65 @@ def display_data_analyst_dashboard(results):
             def highlight_best_model(row):
                 best_model = results.get('best_model', {}).get('name', '').replace('_', ' ').title()
                 if row['Model'] == best_model:
-                    return ['background-color: #90EE90'] * len(row)
+                    return ['background-color: #e6f3ff'] * len(row)
                 return [''] * len(row)
             
             st.dataframe(metrics_df.style.apply(highlight_best_model, axis=1), use_container_width=True)
             
-            # Best model highlight
+            # Best model performance with emoji indicators
             best_model = results.get('best_model', {})
             if best_model.get('name'):
                 score = best_model.get('score', 0)
-                st.success(f"🏆 **Best Performing Model**: **{best_model['name'].replace('_', ' ').title()}** (Score: {score:.4f})")
+                model_name = best_model['name'].replace('_', ' ').title()
                 
-                # Performance interpretation
+                # Performance interpretation with emojis
                 if score >= 0.9:
-                    st.info("🔥 **Excellent Performance** - Model is highly accurate and reliable")
+                    performance_emoji = "🔥"
+                    performance_text = "EXCELLENT"
+                    color = "green"
                 elif score >= 0.8:
-                    st.info("✅ **Good Performance** - Model performs well for practical use")
+                    performance_emoji = "✅"
+                    performance_text = "GOOD"
+                    color = "blue"
                 elif score >= 0.7:
-                    st.info("⚠️ **Moderate Performance** - Consider feature engineering or different algorithms")
+                    performance_emoji = "⚠️"
+                    performance_text = "MODERATE"
+                    color = "orange"
                 else:
-                    st.warning("🔧 **Needs Improvement** - Review data quality and model selection")
+                    performance_emoji = "🔧"
+                    performance_text = "NEEDS IMPROVEMENT"
+                    color = "red"
+                
+                st.success(f"🏆 **Best Performing Model**: **{model_name}** {performance_emoji}")
+                st.markdown(f"<h3 style='color: {color};'>Performance: {performance_text} (Score: {score:.4f})</h3>", unsafe_allow_html=True)
     
-    # Feature Importance with COLORFUL Chart
+    # Feature Importance with Interactive Chart
     if 'feature_importance' in results and results['feature_importance']:
+        st.markdown("---")
         st.subheader("🔍 Feature Importance Analysis")
         
-        features = results['feature_importance']
-        if features:
-            # Get top 10 features
-            top_features = dict(sorted(features.items(), key=lambda x: x[1], reverse=True)[:10])
+        best_model = results.get('best_model', {}).get('name')
+        if best_model and best_model in results['feature_importance']:
+            feature_chart = create_feature_importance_chart(results['feature_importance'][best_model])
+            if feature_chart:
+                st.plotly_chart(feature_chart, use_container_width=True)
             
-            # Create colorful bar chart
-            fig = px.bar(
-                x=list(top_features.values()), 
-                y=list(top_features.keys()),
-                orientation='h',
-                title="Top 10 Most Important Features",
-                color=list(top_features.values()),
-                color_continuous_scale='viridis'
-            )
-            
-            fig.update_layout(
-                xaxis_title="Feature Importance Score",
-                yaxis_title="Features",
-                showlegend=False,
-                height=400
-            )
-            
-            fig.update_traces(
-                marker_line_color='black',
-                marker_line_width=1
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Feature importance insights
-            col1, col2 = st.columns(2)
-            with col1:
-                most_important = list(top_features.keys())[0]
-                st.info(f"**Most Important Feature:** `{most_important}`")
-            
-            with col2:
-                st.info(f"**Total Features Analyzed:** {len(features)}")
+            # Feature insights
+            features = results['feature_importance'][best_model]
+            if features:
+                top_features = sorted(features.items(), key=lambda x: x[1], reverse=True)[:5]
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.info(f"**🏆 Most Important Feature:** `{top_features[0][0]}`")
+                with col2:
+                    st.info(f"**📊 Total Features Analyzed:** {len(features)}")
     
-    # Target Distribution with PROPER Chart
-    st.subheader("📈 Target Distribution Analysis")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Create target distribution chart
-        try:
-            dist_str = results.get('dataset_info', {}).get('target_distribution', '{}')
-            # Clean the distribution string
-            dist_str = dist_str.replace("'", '"')
-            target_dist = json.loads(dist_str)
-            
-            if target_dist:
-                # Create pie chart
-                fig_pie = px.pie(
-                    values=list(target_dist.values()),
-                    names=[f"Class {k}" for k in target_dist.keys()],
-                    title="Target Class Distribution"
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
-        except:
-            st.info("📊 Target distribution visualization available")
-    
-    with col2:
-        # Problem insights
-        problem_type = results.get('problem_type', '')
-        target_col = results.get('target_column', '')
-        
-        st.info("**🎯 Problem Insights**")
-        if problem_type == 'binary_classification':
-            st.write("• **Binary Classification**")
-            st.write("• Predicting between two classes")
-            st.write("• Ideal for yes/no predictions")
-            st.write(f"• Target: `{target_col}`")
-        elif problem_type == 'multiclass_classification':
-            st.write("• **Multi-class Classification**")
-            st.write("• Predicting multiple categories")
-            st.write("• Requires balanced evaluation")
-            st.write(f"• Target: `{target_col}`")
-    
-    # Execution Summary
+    # Pipeline Execution Summary
+    st.markdown("---")
     st.subheader("⚙️ Pipeline Execution Summary")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.metric("Execution Time", f"{results.get('execution_time', 0):.2f}s")
@@ -362,49 +531,82 @@ def display_data_analyst_dashboard(results):
         st.metric("Models Trained", len(results.get('model_comparison', {})))
     
     with col3:
-        st.metric("Status", "✅ Success" if results.get('status') == 'success' else "❌ Failed")
+        tuning_status = "✅ Enabled" if results.get('hyperparameter_tuning') else "❌ Disabled"
+        st.metric("Hyperparameter Tuning", tuning_status)
     
-    # Additional Insights
-    st.info("**💡 Auto-ML Insights**")
-    col1, col2 = st.columns(2)
+    with col4:
+        ai_status = "✅ Enabled" if results.get('ai_assistance') else "❌ Disabled"
+        st.metric("AI Assistance", ai_status)
     
-    with col1:
-        st.write("• **Smart Target Detection** - Automatically identified the prediction target")
-        st.write("• **Auto Preprocessing** - Handled missing values and encoding")
-    
-    with col2:
-        st.write("• **Multi-Model Training** - Tested multiple algorithms")
-        st.write("• **Best Model Selection** - Selected optimal model based on performance")
+    # Configuration Details
+    with st.expander("🔧 View Detailed Configuration"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("**Pipeline Settings:**")
+            st.write(f"- Problem Type: {results.get('problem_type', 'N/A')}")
+            st.write(f"- Target Column: {results.get('target_column', 'N/A')}")
+            st.write(f"- Dataset: {results.get('dataset_name', 'N/A')}")
+        
+        with col2:
+            st.write("**Advanced Features:**")
+            st.write(f"- Hyperparameter Tuning: {results.get('hyperparameter_tuning', False)}")
+            st.write(f"- AI Assistance: {results.get('ai_assistance', False)}")
+            st.write(f"- Status: {results.get('status', 'N/A')}")
 
 def main():
     initialize_session_state()
     
-    st.title("🚀 Smart Predictor - Auto ML Platform")
-    st.markdown("### Fully Automated Machine Learning with Professional Analytics Dashboard")
+    # Main Header
+    st.markdown('<div class="main-header">🚀 Smart Predictor - Universal Auto ML</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Fully Automated Machine Learning with Enhanced Analytics</div>', unsafe_allow_html=True)
     
     databricks_config = get_databricks_config()
     if not databricks_config:
-        st.error("❌ Databricks configuration missing.")
+        st.error("❌ Databricks configuration missing. Please check your secrets.toml file.")
         return
     
-    # Sidebar - CLEANED UP
+    # Sidebar - Enhanced Configuration
     with st.sidebar:
-        st.header("⚡ Features")
-        st.success("""
-        **Automated ML Pipeline:**
+        st.markdown("## ⚡ Pipeline Configuration")
+        
+        st.markdown("### 🔧 Advanced Options")
+        enable_tuning = st.checkbox(
+            "Enable Hyperparameter Tuning", 
+            value=st.session_state.pipeline_config['enable_tuning'],
+            help="Better accuracy but slower execution"
+        )
+        
+        use_ai_assist = st.checkbox(
+            "Use AI for Target Detection & Insights", 
+            value=st.session_state.pipeline_config['use_ai_assist'],
+            help="Smart target identification and conversational insights"
+        )
+        
+        # Update session state
+        st.session_state.pipeline_config.update({
+            'enable_tuning': enable_tuning,
+            'use_ai_assist': use_ai_assist
+        })
+        
+        st.markdown("---")
+        st.markdown("## 📊 Features")
+        
+        st.markdown("""
+        **🤖 Enhanced AutoML:**
         - Smart Target Detection
-        - Auto Preprocessing  
+        - Enhanced EDA & Data Quality
         - Multi-Model Training
-        - Best Model Selection
+        - Optional Hyperparameter Tuning
+        - AI-Powered Insights
         """)
         
-        st.header("📊 Analytics")
-        st.info("""
-        **Professional Dashboard:**
-        - Data Quality Reports
-        - Model Performance
+        st.markdown("""
+        **📈 Advanced Analytics:**
+        - Interactive Visualizations
         - Feature Importance
-        - Execution Insights
+        - Model Comparison
+        - Business Insights
+        - Performance Analysis
         """)
     
     # Main area with tabs
@@ -414,41 +616,73 @@ def main():
         col1, col2 = st.columns([1, 1])
         
         with col1:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
             st.header("🎯 How It Works")
             st.info("""
-            1. **Upload CSV** in Databricks
-            2. **Enter file path** 
-            3. **Run Auto-ML Pipeline**
-            4. **View Analytics Dashboard**
+            **1. Configure Pipeline**  
+            Set your preferences using the sidebar options
             
-            **Smart Features:**
-            - Automatic target detection
-            - Data preprocessing
-            - Model comparison
-            - Best model selection
+            **2. Run Auto-ML**  
+            Start the enhanced pipeline with one click
+            
+            **3. View Results**  
+            Explore interactive analytics dashboard
+            
+            **4. Get Insights**  
+            AI-powered explanations and recommendations
             """)
+            
+            st.markdown("**⚡ Smart Features:**")
+            st.write("• Multi-layer target detection")
+            st.write("• Enhanced data quality analysis") 
+            st.write("• Optional hyperparameter tuning")
+            st.write("• Conversational AI insights")
+            st.markdown('</div>', unsafe_allow_html=True)
         
         with col2:
-            st.header("🚀 Start Pipeline")
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.header("🚀 Start Enhanced Pipeline")
             
-            if st.button("🎯 Start Auto-ML Pipeline", type="primary", use_container_width=True):
+            if st.button("🎯 Run Auto-ML Pipeline", type="primary", use_container_width=True):
                 run_auto_ml_pipeline()
             
-            # Status display
+            # Status display with emojis
             if st.session_state.job_status == 'running':
-                st.info("🔄 Pipeline running...")
+                st.info("🔄 Enhanced pipeline running...")
+                st.write("• Smart target detection")
+                st.write("• Enhanced EDA analysis") 
+                st.write("• Model training with optional tuning")
+                st.write("• AI insights generation")
             elif st.session_state.job_status == 'completed':
-                st.success("✅ Pipeline completed!")
+                st.success("✅ Pipeline completed successfully!")
+                st.balloons()
             elif st.session_state.job_status == 'failed':
-                st.error("❌ Pipeline failed.")
+                st.error("❌ Pipeline execution failed.")
+            st.markdown('</div>', unsafe_allow_html=True)
     
     with tab2:
         if st.session_state.auto_ml_results:
-            display_data_analyst_dashboard(st.session_state.auto_ml_results)
+            display_enhanced_analytics_dashboard(st.session_state.auto_ml_results)
         else:
-            st.info("👆 Run the Auto-ML pipeline first to see the analytics dashboard!")
-            st.image("https://images.unsplash.com/photo-1551288049-bebda4e38f71?w=600&h=300&fit=crop", 
-                    use_column_width=True, caption="Ready to analyze your data!")
+            st.info("👆 Run the Enhanced Auto-ML pipeline first to see the analytics dashboard!")
+            
+            # Show preview of what's coming
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("### 📈 What to Expect:")
+                st.write("• Interactive model performance charts")
+                st.write("• Feature importance analysis")
+                st.write("• Data quality insights")
+                st.write("• AI-powered recommendations")
+            
+            with col2:
+                st.markdown("### 🎯 Sample Output:")
+                st.code("""
+🤖 AI INSIGHTS:
+"Your model achieved 89% accuracy - 
+excellent for this problem type! 
+Ready for production deployment."
+                """)
 
 if __name__ == "__main__":
     main()
