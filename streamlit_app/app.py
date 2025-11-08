@@ -1,13 +1,12 @@
 import streamlit as st
-import pandas as pd
 import requests
 import json
 import time
-from io import BytesIO
+import pandas as pd
 
 # Page configuration
 st.set_page_config(
-    page_title="Databricks ML Pipeline", 
+    page_title="Smart Predictor ML Platform", 
     layout="wide",
     page_icon="🚀"
 )
@@ -18,8 +17,6 @@ def initialize_session_state():
         st.session_state.job_status = 'not_started'
     if 'run_id' not in st.session_state:
         st.session_state.run_id = None
-    if 'table_name' not in st.session_state:
-        st.session_state.table_name = "diabetes_data_corrected"
 
 def get_databricks_config():
     """Get Databricks configuration from secrets"""
@@ -34,8 +31,8 @@ def get_databricks_config():
         st.error(f"❌ Error loading Databricks configuration: {e}")
         return None
 
-def trigger_databricks_job(config, table_name, model_type, enable_tuning, test_size):
-    """Trigger Databricks job via API"""
+def trigger_databricks_job(config):
+    """Trigger Databricks Auto-ML job"""
     try:
         url = f"{config['host']}/api/2.0/jobs/run-now"
         
@@ -44,16 +41,9 @@ def trigger_databricks_job(config, table_name, model_type, enable_tuning, test_s
             "Content-Type": "application/json"
         }
         
-        # Job parameters
+        # No parameters needed - everything is automated
         data = {
-            "job_id": int(config['job_id']),
-            "notebook_params": {
-                "table_name": table_name,
-                "model_type": model_type,
-                "enable_tuning": str(enable_tuning).lower(),
-                "test_size": str(test_size),
-                "output_path": "dbfs:/FileStore/results"
-            }
+            "job_id": int(config['job_id'])
         }
         
         response = requests.post(url, headers=headers, json=data)
@@ -102,8 +92,8 @@ def get_job_status(config, run_id):
             "state_message": str(e)
         }
 
-def run_pipeline(table_name, model_name, enable_tuning, test_size):
-    """Trigger the Databricks pipeline"""
+def run_auto_ml_pipeline():
+    """Trigger the Auto-ML pipeline"""
     try:
         config = get_databricks_config()
         if not config:
@@ -114,19 +104,10 @@ def run_pipeline(table_name, model_name, enable_tuning, test_size):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Map model names to internal codes
-        model_mapping = {
-            "Logistic Regression": "logistic",
-            "Random Forest": "random_forest", 
-            "Neural Network": "neural_net"
-        }
-        
-        model_code = model_mapping[model_name]
-        
         # Step 1: Trigger job
-        status_text.info("🚀 Starting ML pipeline on Databricks...")
-        run_id = trigger_databricks_job(config, table_name, model_code, enable_tuning, test_size)
-        progress_bar.progress(30)
+        status_text.info("🚀 Starting Auto-ML Pipeline on Databricks...")
+        run_id = trigger_databricks_job(config)
+        progress_bar.progress(20)
         
         if not run_id:
             st.error("❌ Failed to start Databricks job.")
@@ -137,20 +118,20 @@ def run_pipeline(table_name, model_name, enable_tuning, test_size):
         st.session_state.job_status = 'running'
         
         # Step 2: Poll for completion
-        status_text.info("🔄 Pipeline running... This may take a few minutes.")
+        status_text.info("🔄 Auto-ML Pipeline running... This may take a few minutes.")
         
-        max_attempts = 120  # 10 minutes max
+        max_attempts = 180  # 15 minutes max for auto-ML
         for attempt in range(max_attempts):
             status_info = get_job_status(config, run_id)
             life_cycle_state = status_info["life_cycle_state"]
             
             # Update progress based on state
             if life_cycle_state == "PENDING":
-                progress = 0.3 + (attempt / max_attempts) * 0.2
+                progress = 0.2 + (attempt / max_attempts) * 0.3
                 status_text.info("⏳ Job queued...")
             elif life_cycle_state == "RUNNING":
                 progress = 0.5 + (attempt / max_attempts) * 0.4
-                status_text.info("🤖 Processing data and training model...")
+                status_text.info("🤖 Auto-ML: Detecting target, preprocessing, training models...")
             else:
                 progress = 0.9
             
@@ -164,7 +145,7 @@ def run_pipeline(table_name, model_name, enable_tuning, test_size):
         progress_bar.progress(1.0)
         
         if life_cycle_state == "TERMINATED" and status_info["result_state"] == "SUCCESS":
-            status_text.success("✅ Pipeline completed successfully!")
+            status_text.success("✅ Auto-ML Pipeline completed successfully!")
             st.session_state.job_status = 'completed'
             show_results_section(config, run_id)
         else:
@@ -177,10 +158,10 @@ def run_pipeline(table_name, model_name, enable_tuning, test_size):
         st.session_state.job_status = 'failed'
 
 def show_results_section(config, run_id):
-    """Display results from the completed job"""
+    """Display results from the completed Auto-ML job"""
     try:
         st.markdown("---")
-        st.header("📊 Pipeline Results")
+        st.header("📊 Auto-ML Results")
         
         # Get job output
         url = f"{config['host']}/api/2.0/jobs/runs/get-output?run_id={run_id}"
@@ -199,7 +180,7 @@ def show_results_section(config, run_id):
             try:
                 results_url = f"{config['host']}/api/2.0/dbfs/read"
                 headers = {"Authorization": f"Bearer {config['token']}"}
-                results_data = {"path": "/FileStore/results/results.json"}
+                results_data = {"path": "/FileStore/auto_ml_results/results.json"}
                 
                 response = requests.get(results_url, headers=headers, json=results_data)
                 if response.status_code == 200:
@@ -208,36 +189,10 @@ def show_results_section(config, run_id):
                     results = json.loads(results_content)
                     
                     if results.get("status") == "success":
-                        st.subheader("📈 Model Performance")
-                        metrics = results.get("metrics", {})
+                        display_auto_ml_results(results)
                         
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1:
-                            st.metric("Accuracy", f"{metrics.get('accuracy', 0):.4f}")
-                        with col2:
-                            st.metric("Precision", f"{metrics.get('precision', 0):.4f}")
-                        with col3:
-                            st.metric("Recall", f"{metrics.get('recall', 0):.4f}")
-                        with col4:
-                            st.metric("F1 Score", f"{metrics.get('f1_score', 0):.4f}")
-                        
-                        if "roc_auc" in metrics:
-                            st.metric("ROC AUC", f"{metrics.get('roc_auc', 0):.4f}")
-                        
-                        # Show dataset info
-                        st.subheader("📋 Dataset Info")
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.info(f"**Table:** {results.get('data_source', 'N/A')}")
-                            st.info(f"**Model:** {results.get('model_type', 'N/A')}")
-                        with col2:
-                            if 'eda' in results:
-                                st.info(f"**Rows:** {results['eda'].get('shape', [0, 0])[0]:,}")
-                                st.info(f"**Features:** {results['eda'].get('shape', [0, 0])[1] - 1}")
-                        
-                        st.success("🎉 Model training completed successfully!")
             except Exception as e:
-                st.info("📊 Check Databricks MLflow for detailed metrics")
+                st.info("📊 Check Databricks workspace for complete results")
                 
         else:
             st.info("📋 Check Databricks workspace for complete results")
@@ -245,11 +200,56 @@ def show_results_section(config, run_id):
     except Exception as e:
         st.error(f"Error fetching results: {e}")
 
+def display_auto_ml_results(results):
+    """Display comprehensive Auto-ML results"""
+    
+    # Model Performance
+    st.subheader("🎯 Model Performance Comparison")
+    
+    if 'model_comparison' in results:
+        model_metrics = results['model_comparison']
+        metrics_df = pd.DataFrame(model_metrics).T
+        
+        # Show best model
+        best_model = results.get('best_model', {})
+        st.success(f"🏆 **Best Model**: {best_model.get('name', 'N/A')} "
+                  f"(Accuracy: {best_model.get('accuracy', 0):.4f})")
+        
+        # Display metrics table
+        st.dataframe(metrics_df)
+    
+    # Dataset Info
+    st.subheader("📋 Dataset Analysis")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.info(f"**Dataset**: {results.get('dataset_name', 'N/A')}")
+        st.info(f"**Target Column**: {results.get('target_column', 'N/A')}")
+    
+    with col2:
+        if 'dataset_info' in results:
+            st.info(f"**Samples**: {results['dataset_info'].get('rows', 'N/A'):,}")
+            st.info(f"**Features**: {results['dataset_info'].get('features', 'N/A')}")
+    
+    with col3:
+        if 'problem_type' in results:
+            st.info(f"**Problem Type**: {results['problem_type']}")
+            st.info(f"**Target Distribution**: {results.get('target_distribution', 'N/A')}")
+    
+    # Feature Importance
+    if 'feature_importance' in results:
+        st.subheader("🔍 Top Feature Importance")
+        features = results['feature_importance']
+        if features:
+            top_features = list(features.items())[:10]
+            for feature, importance in top_features:
+                st.write(f"`{feature}`: {importance:.4f}")
+
 def main():
     initialize_session_state()
     
-    st.title("🚀 Databricks ML Pipeline")
-    st.markdown("Train ML models on Diabetes Prediction Dataset!")
+    st.title("🚀 Smart Predictor - Auto ML Platform")
+    st.markdown("### Fully Automated Machine Learning - Upload any dataset and get predictions!")
     
     # Check configurations
     databricks_config = get_databricks_config()
@@ -258,121 +258,74 @@ def main():
         st.error("❌ Databricks configuration missing.")
         return
     
-    # Sidebar for configuration
+    # Sidebar for information
     with st.sidebar:
-        st.header("⚙️ Configuration")
-        
-        # Model selection
-        model_options = [
-            "Logistic Regression",
-            "Random Forest", 
-            "Neural Network"
-        ]
-        
-        selected_model = st.selectbox("Select Model", options=model_options, index=1)
-        enable_tuning = st.checkbox("Enable Hyperparameter Tuning", value=False)
-        test_size = st.slider("Test Set Size (%)", 10, 40, 20)
-        
-        st.markdown("---")
-        st.header("📊 Current Setup")
-        st.success(f"✅ Using Table: **{st.session_state.table_name}**")
-        st.write(f"**Model:** {selected_model}")
-        st.write(f"**Test Size:** {test_size}%")
-        st.write(f"**Tuning:** {'Yes' if enable_tuning else 'No'}")
-        
-        st.markdown("---")
-        st.header("📈 Dataset Info")
+        st.header("⚡ Auto-ML Features")
         st.info("""
-        **Diabetes Prediction Dataset:**
-        - **Target:** Diabetes_binary (0.0 = No, 1.0 = Yes)
-        - **Samples:** 253,681
-        - **Features:** 21 health indicators
-        - **Classes:** 0.0 (86%), 1.0 (14%)
+        **What happens automatically:**
+        - 📁 File upload & table creation
+        - 🎯 Smart target detection  
+        - 🔧 Auto preprocessing
+        - 🤖 Multiple model training
+        - 📊 Model comparison
+        - 🏆 Best model selection
         """)
         
-        st.markdown("---")
-        st.header("ℹ️ How It Works")
+        st.header("📁 Supported Datasets")
         st.info("""
-        **Process:**
-        1. Configure ML settings
-        2. Start pipeline with diabetes dataset
-        3. Databricks trains model on health data
-        4. View prediction results
-        
-        **Features:**
-        - HighBP, HighChol, BMI, Smoker
-        - Stroke, HeartDisease, PhysActivity
-        - Fruits, Veggies, AlcoholConsump
+        **Any CSV file with:**
+        - Classification or Regression
+        - Any number of features
+        - Any data types
+        - Automatic target detection
         """)
     
     # Main area
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.header("📋 Dataset Preview")
-        st.info(f"""
-        **Using Table:** `{st.session_state.table_name}`
-        
-        **Target Variable:** `Diabetes_binary`
-        - **0.0**: No Diabetes (218,334 samples)
-        - **1.0**: Has Diabetes (35,346 samples)
-        
-        **Health Indicators:**
-        - HighBP, HighChol, CholCheck, BMI
-        - Smoker, Stroke, HeartDiseaseorAttack
-        - PhysActivity, Fruits, Veggies, HvyAlcoholConsump
+        st.header("🎯 How It Works")
+        st.info("""
+        1. **Upload your CSV** in Databricks notebook
+        2. **Auto-ML pipeline** detects everything automatically:
+           - Target column
+           - Problem type (classification/regression)
+           - Data preprocessing needed
+           - Best model selection
+        3. **View results** here with model comparison
         """)
         
-        # Show table preview
-        if st.button("🔍 Preview Data", use_container_width=True):
-            try:
-                config = get_databricks_config()
-                if config:
-                    # Execute SQL to get table preview
-                    sql_url = f"{config['host']}/api/2.0/sql/statements"
-                    headers = {"Authorization": f"Bearer {config['token']}"}
-                    
-                    sql_data = {
-                        "statement": f"""
-                        SELECT Diabetes_binary, HighBP, HighChol, BMI, Smoker, 
-                               Stroke, HeartDiseaseorAttack, PhysActivity
-                        FROM hive_metastore.default.{st.session_state.table_name} 
-                        LIMIT 8
-                        """,
-                        "warehouse_id": "auto"
-                    }
-                    
-                    response = requests.post(sql_url, headers=headers, json=sql_data)
-                    if response.status_code == 200:
-                        result = response.json()
-                        if 'result' in result and 'data_array' in result['result']:
-                            data = result['result']['data_array']
-                            columns = [col['name'] for col in result['result']['manifest']['schema']['columns']]
-                            preview_df = pd.DataFrame(data, columns=columns)
-                            st.dataframe(preview_df)
-            except Exception as e:
-                st.error(f"Could not fetch preview: {e}")
+        st.warning("""
+        ⚠️ **Important:**
+        - Upload your CSV file in the Databricks notebook
+        - The system will automatically detect the target column
+        - No manual configuration needed!
+        """)
     
     with col2:
-        st.header("🚀 Run ML Pipeline")
+        st.header("🚀 Start Auto-ML Pipeline")
         
-        st.write("**Pipeline Configuration:**")
-        st.write(f"- **Dataset:** Diabetes Prediction")
-        st.write(f"- **Samples:** 253,681 patients")
-        st.write(f"- **Target:** Diabetes Detection")
-        st.write(f"- **Model:** {selected_model}")
-        st.write(f"- **Test Size:** {test_size}%")
-        st.write(f"- **Tuning:** {'Yes' if enable_tuning else 'No'}")
+        st.success("""
+        **Current Status:**
+        - ✅ Streamlit Dashboard: Ready
+        - ✅ Databricks Auto-ML: Ready
+        - ✅ Model Training: Automated
+        - ✅ Results Display: Integrated
+        """)
         
-        if st.button("🎯 Start Diabetes Prediction Pipeline", type="primary", use_container_width=True):
-            run_pipeline(st.session_state.table_name, selected_model, enable_tuning, test_size)
+        if st.button("🎯 Start Fully Automated ML Pipeline", type="primary", use_container_width=True):
+            run_auto_ml_pipeline()
         
         # Show status
         if st.session_state.job_status == 'running':
-            st.info("🔄 Pipeline is running...")
-            st.info("💡 Training model on diabetes dataset...")
+            st.info("🔄 Auto-ML Pipeline is running...")
+            st.info("💡 The system is automatically:")
+            st.info("   - Detecting target column")
+            st.info("   - Preprocessing data")  
+            st.info("   - Training multiple models")
+            st.info("   - Selecting best model")
         elif st.session_state.job_status == 'completed':
-            st.success("✅ Pipeline completed!")
+            st.success("✅ Auto-ML Pipeline completed!")
         elif st.session_state.job_status == 'failed':
             st.error("❌ Pipeline failed.")
 
