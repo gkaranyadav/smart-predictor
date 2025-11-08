@@ -1,5 +1,5 @@
-
-#app.pyimport streamlit as st
+#app.py
+import streamlit as st
 import pandas as pd
 import requests
 import json
@@ -379,3 +379,437 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+#dbx_utils
+# dbx_utils.py
+import os
+import requests
+import json
+from typing import Dict
+
+DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST")  # e.g. "https://<your-workspace>.cloud.databricks.com"
+DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN")
+
+if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+    # don't raise here; streamlit will show instructions to set them
+    pass
+
+HEADERS = {
+    "Authorization": f"Bearer {DATABRICKS_TOKEN}"
+}
+
+def upload_file_to_dbfs(local_path: str, dbfs_path: str):
+    """
+    Upload local file to DBFS using the 2-step create+put API (small files supported).
+    Uses simple single PUT approach. For large files you can chunk.
+    """
+    # read bytes
+    with open(local_path, "rb") as f:
+        data = f.read()
+
+    url = f"{DATABRICKS_HOST}/api/2.0/dbfs/put"
+    resp = requests.post(url, headers=HEADERS, json={
+        "path": dbfs_path,
+        "contents": data.hex(),  # DBFS put expects base64, but hex won't work for every workspace; fallback to base64
+    })
+    # Some workspaces expect base64; if server returns 400 try base64:
+    if resp.status_code != 200:
+        import base64
+        resp = requests.post(url, headers=HEADERS, json={
+            "path": dbfs_path,
+            "contents": base64.b64encode(data).decode("utf-8"),
+        })
+    resp.raise_for_status()
+    return resp.json()
+
+def run_job_now(job_name: str, notebook_params: Dict = None) -> Dict:
+    """
+    Starts a run of existing job by name (keeps job name the same).
+    Returns run_id and response.
+    """
+    # First find job id by name
+    search_url = f"{DATABRICKS_HOST}/api/2.1/jobs/list"
+    r = requests.get(search_url, headers=HEADERS)
+    r.raise_for_status()
+    jobs = r.json().get("jobs", [])
+    job_id = None
+    for j in jobs:
+        if j.get("settings", {}).get("name") == job_name:
+            job_id = j["job_id"]
+            break
+    if job_id is None:
+        raise ValueError(f"Job with name '{job_name}' not found in Databricks workspace.")
+
+    run_url = f"{DATABRICKS_HOST}/api/2.1/jobs/run-now"
+    payload = {"job_id": job_id}
+    if notebook_params:
+        payload["notebook_params"] = notebook_params
+    r2 = requests.post(run_url, headers=HEADERS, json=payload)
+    r2.raise_for_status()
+    return r2.json()
+
+#ml_pipeline_main.py
+#!/usr/bin/env python3
+# Databricks notebook source
+# ML Pipeline - Diabetes Prediction
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # 🚀 Diabetes Prediction ML Pipeline
+# MAGIC 
+# MAGIC **Predicts diabetes based on health indicators**
+
+# COMMAND ----------
+
+# Import libraries
+import pandas as pd
+import numpy as np
+from pyspark.sql import SparkSession
+import mlflow
+import mlflow.sklearn
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, classification_report
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+import json
+import os
+from datetime import datetime
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## ⚙️ Configuration
+
+# COMMAND ----------
+
+# Create widgets for parameters
+dbutils.widgets.text("table_name", "diabetes_data_corrected", "Table Name")
+dbutils.widgets.dropdown("model_type", "random_forest", ["logistic", "random_forest", "neural_net"], "Model Type")
+dbutils.widgets.dropdown("enable_tuning", "false", ["true", "false"], "Enable Tuning")
+dbutils.widgets.text("test_size", "20", "Test Size (%)")
+dbutils.widgets.text("output_path", "dbfs:/FileStore/results", "Output Results Path")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 🚀 ML Pipeline Functions
+
+# COMMAND ----------
+
+def load_data_from_table(table_name):
+    """Load data from Delta Table"""
+    print("📁 Loading data from Delta Table...")
+    print(f"Table Name: {table_name}")
+    
+    try:
+        full_table_name = f"hive_metastore.default.{table_name}"
+        df_spark = spark.sql(f"SELECT * FROM {full_table_name}")
+        df = df_spark.toPandas()
+        
+        print(f"✅ Data loaded successfully!")
+        print(f"📊 Shape: {df.shape}")
+        print(f"🎯 Columns: {df.columns.tolist()}")
+        
+        return df
+        
+    except Exception as e:
+        print(f"❌ Error loading data from table: {str(e)}")
+        raise e
+
+def perform_eda(df):
+    """Perform Exploratory Data Analysis"""
+    print("📊 Performing EDA...")
+    
+    # Calculate basic statistics
+    eda_results = {
+        "shape": df.shape,
+        "columns": df.columns.tolist(),
+        "data_types": str(df.dtypes.to_dict()),
+        "missing_values": df.isnull().sum().to_dict(),
+        "target_distribution": None,
+        "feature_summary": {}
+    }
+    
+    # Target analysis
+    target_col = 'Diabetes_binary'
+    if target_col in df.columns:
+        target_dist = df[target_col].value_counts().to_dict()
+        eda_results["target_distribution"] = target_dist
+        eda_results["target_name"] = target_col
+        
+        print(f"🎯 Target column: {target_col}")
+        print(f"📈 Target distribution: {target_dist}")
+        print(f"🔢 Class ratio: {target_dist.get(0.0, 0)} (No Diabetes) vs {target_dist.get(1.0, 0)} (Diabetes)")
+    
+    # Feature analysis
+    feature_cols = [col for col in df.columns if col != target_col]
+    for col in feature_cols[:10]:  # First 10 features
+        if df[col].dtype in ['int64', 'float64']:
+            eda_results["feature_summary"][col] = {
+                "mean": float(df[col].mean()),
+                "std": float(df[col].std()),
+                "min": float(df[col].min()),
+                "max": float(df[col].max())
+            }
+    
+    print("✅ EDA completed")
+    return eda_results
+
+def preprocess_data(df, test_size=0.2):
+    """Preprocess the diabetes data for ML"""
+    print("🔧 Preprocessing data...")
+    
+    target_col = 'Diabetes_binary'
+    feature_cols = [col for col in df.columns if col != target_col]
+    
+    X = df[feature_cols]
+    y = df[target_col]
+    
+    print(f"Original - Features: {X.shape}, Target: {y.shape}")
+    print(f"🎯 Target distribution: {y.value_counts().to_dict()}")
+    
+    # Handle missing values
+    missing_before = X.isnull().sum().sum()
+    if missing_before > 0:
+        print(f"🔄 Handling {missing_before} missing values...")
+        # Fill numeric columns with median
+        numeric_cols = X.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            X[col] = X[col].fillna(X[col].median())
+    
+    # Ensure all data is numeric
+    for col in X.columns:
+        X[col] = pd.to_numeric(X[col], errors='coerce')
+    
+    # Ensure target is numeric and remove any NaN
+    y = pd.to_numeric(y, errors='coerce')
+    valid_indices = ~y.isna()
+    X = X[valid_indices]
+    y = y[valid_indices]
+    
+    print(f"After cleaning - Features: {X.shape}, Target: {y.shape}")
+    print(f"🎯 Final target distribution: {y.value_counts().to_dict()}")
+    
+    # Check if we have enough samples for stratification
+    min_class_size = y.value_counts().min()
+    if min_class_size < 2:
+        print("⚠️ Very small class detected, using simple split")
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=42
+        )
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=42, stratify=y
+        )
+    
+    print(f"✅ Data preprocessed successfully!")
+    print(f"📊 Train set: {X_train.shape}, Test set: {X_test.shape}")
+    return X_train, X_test, y_train, y_test, feature_cols
+
+def train_model(X_train, X_test, y_train, y_test, model_type, enable_tuning):
+    """Train the selected model"""
+    print(f"🎯 Training model: {model_type}")
+    
+    models = {
+        "logistic": LogisticRegression(random_state=42, max_iter=1000, class_weight='balanced'),
+        "random_forest": RandomForestClassifier(random_state=42, n_estimators=100, class_weight='balanced'),
+        "neural_net": MLPClassifier(random_state=42, max_iter=1000, hidden_layer_sizes=(100, 50))
+    }
+    
+    if model_type not in models:
+        print(f"⚠️ Model type {model_type} not found, using Random Forest")
+        model_type = "random_forest"
+    
+    model = models[model_type]
+    
+    print(f"Training {model_type}...")
+    model.fit(X_train, y_train)
+    print(f"✅ {model_type} training completed!")
+    
+    # Make predictions
+    y_pred = model.predict(X_test)
+    y_pred_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, "predict_proba") else y_pred
+    
+    # Calculate metrics
+    metrics = {
+        "accuracy": accuracy_score(y_test, y_pred),
+        "precision": precision_score(y_test, y_pred, average='weighted', zero_division=0),
+        "recall": recall_score(y_test, y_pred, average='weighted', zero_division=0),
+        "f1_score": f1_score(y_test, y_pred, average='weighted', zero_division=0),
+    }
+    
+    # Calculate ROC AUC for binary classification
+    unique_classes = np.unique(y_test)
+    if len(unique_classes) == 2 and len(np.unique(y_pred_proba)) > 1:
+        metrics["roc_auc"] = roc_auc_score(y_test, y_pred_proba)
+    else:
+        metrics["roc_auc"] = 0.5
+    
+    # Class-wise metrics for imbalanced dataset
+    if len(unique_classes) == 2:
+        metrics["precision_class_0"] = precision_score(y_test, y_pred, pos_label=0, zero_division=0)
+        metrics["recall_class_0"] = recall_score(y_test, y_pred, pos_label=0, zero_division=0)
+        metrics["precision_class_1"] = precision_score(y_test, y_pred, pos_label=1, zero_division=0)
+        metrics["recall_class_1"] = recall_score(y_test, y_pred, pos_label=1, zero_division=0)
+    
+    print("📈 Model Metrics:")
+    for key, value in metrics.items():
+        print(f"  {key}: {value:.4f}")
+    
+    # Log to MLflow
+    mlflow.sklearn.log_model(model, "model")
+    mlflow.log_param("model_type", model_type)
+    mlflow.log_param("enable_tuning", enable_tuning)
+    mlflow.log_param("dataset", "diabetes_prediction")
+    mlflow.log_param("target", "Diabetes_binary")
+    
+    for key, value in metrics.items():
+        mlflow.log_metric(key, value)
+    
+    print("✅ Model training and logging completed")
+    return model, metrics
+
+def save_results(results, output_path):
+    """Save results to DBFS"""
+    print("💾 Saving results...")
+    
+    try:
+        results_json = json.dumps(results, indent=2)
+        dbutils.fs.mkdirs(output_path)
+        dbfs_output_path = f"{output_path}/results.json"
+        dbutils.fs.put(dbfs_output_path, results_json, overwrite=True)
+        print(f"✅ Results saved to: {dbfs_output_path}")
+        
+        if 'metrics' in results and 'accuracy' in results['metrics']:
+            accuracy = results['metrics']['accuracy']
+            print(f"📊 Final Accuracy: {accuracy:.4f}")
+            if 'roc_auc' in results['metrics']:
+                print(f"📈 ROC AUC: {results['metrics']['roc_auc']:.4f}")
+        
+    except Exception as e:
+        print(f"❌ Error saving results: {e}")
+        raise e
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 🎯 Main Pipeline
+
+# COMMAND ----------
+
+def main_pipeline():
+    """Main pipeline execution"""
+    try:
+        # Get parameters from widgets
+        table_name = dbutils.widgets.get("table_name")
+        model_type = dbutils.widgets.get("model_type")
+        enable_tuning = dbutils.widgets.get("enable_tuning")
+        test_size = float(dbutils.widgets.get("test_size")) / 100
+        output_path = dbutils.widgets.get("output_path")
+        
+        print("=" * 60)
+        print("🚀 Starting Diabetes Prediction Pipeline")
+        print("=" * 60)
+        print(f"📊 Table Name: {table_name}")
+        print(f"🎯 Model: {model_type}")
+        print(f"📈 Test Size: {test_size}")
+        print(f"⚙️ Tuning: {enable_tuning}")
+        
+        # Start MLflow experiment
+        experiment_name = f"/Diabetes_Prediction_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        mlflow.set_experiment(experiment_name)
+        
+        with mlflow.start_run():
+            # Log parameters
+            mlflow.log_param("model_type", model_type)
+            mlflow.log_param("enable_tuning", enable_tuning)
+            mlflow.log_param("test_size", test_size)
+            mlflow.log_param("table_name", table_name)
+            mlflow.log_param("problem_type", "binary_classification")
+            
+            # Step 1: Load data from Delta Table
+            print("\n📁 Step 1: Loading data from Delta Table...")
+            df = load_data_from_table(table_name)
+            
+            # Step 2: Perform EDA
+            print("\n📊 Step 2: Exploratory Data Analysis")
+            eda_results = perform_eda(df)
+            mlflow.log_dict(eda_results, "eda_results.json")
+            
+            # Step 3: Preprocess data
+            print("\n🔧 Step 3: Data Preprocessing")
+            X_train, X_test, y_train, y_test, feature_cols = preprocess_data(df, test_size)
+            
+            # Step 4: Train model
+            print("\n🤖 Step 4: Model Training")
+            model, metrics = train_model(X_train, X_test, y_train, y_test, model_type, enable_tuning)
+            
+            # Step 5: Save results
+            print("\n💾 Step 5: Saving Results")
+            results = {
+                "model_type": model_type,
+                "metrics": metrics,
+                "eda": eda_results,
+                "data_source": table_name,
+                "timestamp": datetime.now().isoformat(),
+                "status": "success",
+                "problem_type": "diabetes_prediction"
+            }
+            
+            save_results(results, output_path)
+            mlflow.log_dict(results, "final_results.json")
+            
+            print("=" * 60)
+            print("✅ Diabetes Prediction Pipeline completed successfully!")
+            print("=" * 60)
+            
+            return results
+            
+    except Exception as e:
+        print("❌ Pipeline failed!")
+        print(f"Error: {str(e)}")
+        
+        error_results = {
+            "status": "failed",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        try:
+            save_results(error_results, output_path)
+        except Exception as save_error:
+            print(f"Could not save error results: {save_error}")
+        
+        raise e
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 🏃‍♂️ Execute Pipeline
+
+# COMMAND ----------
+
+# Execute the pipeline
+final_results = main_pipeline()
+
+if final_results and final_results.get("status") == "success":
+    print("\n🎉 DIABETES PREDICTION PIPELINE COMPLETED!")
+    print(f"📊 Model: {final_results['model_type']}")
+    print(f"📈 Accuracy: {final_results['metrics']['accuracy']:.4f}")
+    
+    print("\n📊 FINAL METRICS:")
+    for metric, value in final_results['metrics'].items():
+        if not metric.startswith('precision_class_') and not metric.startswith('recall_class_'):
+            print(f"  {metric}: {value:.4f}")
+    
+    # Show class-wise metrics if available
+    if 'precision_class_0' in final_results['metrics']:
+        print("\n🎯 CLASS-WISE METRICS (Diabetes Prediction):")
+        print(f"  No Diabetes (0) - Precision: {final_results['metrics']['precision_class_0']:.4f}, Recall: {final_results['metrics']['recall_class_0']:.4f}")
+        print(f"  Has Diabetes (1) - Precision: {final_results['metrics']['precision_class_1']:.4f}, Recall: {final_results['metrics']['recall_class_1']:.4f}")
+    
+else:
+    print("\n💥 PIPELINE EXECUTION FAILED!")
