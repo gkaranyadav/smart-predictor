@@ -1,1 +1,381 @@
 
+#app.pyimport streamlit as st
+import pandas as pd
+import requests
+import json
+import time
+from io import BytesIO
+
+# Page configuration
+st.set_page_config(
+    page_title="Databricks ML Pipeline", 
+    layout="wide",
+    page_icon="🚀"
+)
+
+def initialize_session_state():
+    """Initialize session state variables"""
+    if 'job_status' not in st.session_state:
+        st.session_state.job_status = 'not_started'
+    if 'run_id' not in st.session_state:
+        st.session_state.run_id = None
+    if 'table_name' not in st.session_state:
+        st.session_state.table_name = "diabetes_data_corrected"
+
+def get_databricks_config():
+    """Get Databricks configuration from secrets"""
+    try:
+        config = {
+            'host': st.secrets["DATABRICKS"]["HOST"].rstrip('/'),
+            'token': st.secrets["DATABRICKS"]["TOKEN"],
+            'job_id': st.secrets["DATABRICKS"]["JOB_ID"]
+        }
+        return config
+    except Exception as e:
+        st.error(f"❌ Error loading Databricks configuration: {e}")
+        return None
+
+def trigger_databricks_job(config, table_name, model_type, enable_tuning, test_size):
+    """Trigger Databricks job via API"""
+    try:
+        url = f"{config['host']}/api/2.0/jobs/run-now"
+        
+        headers = {
+            "Authorization": f"Bearer {config['token']}",
+            "Content-Type": "application/json"
+        }
+        
+        # Job parameters
+        data = {
+            "job_id": int(config['job_id']),
+            "notebook_params": {
+                "table_name": table_name,
+                "model_type": model_type,
+                "enable_tuning": str(enable_tuning).lower(),
+                "test_size": str(test_size),
+                "output_path": "dbfs:/FileStore/results"
+            }
+        }
+        
+        response = requests.post(url, headers=headers, json=data)
+        
+        if response.status_code == 200:
+            run_id = response.json()["run_id"]
+            return run_id
+        else:
+            st.error(f"❌ Job trigger failed: {response.text}")
+            return None
+            
+    except Exception as e:
+        st.error(f"❌ Error triggering job: {e}")
+        return None
+
+def get_job_status(config, run_id):
+    """Get job status"""
+    try:
+        url = f"{config['host']}/api/2.0/jobs/runs/get?run_id={run_id}"
+        
+        headers = {
+            "Authorization": f"Bearer {config['token']}"
+        }
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            result = response.json()
+            state = result["state"]
+            return {
+                "life_cycle_state": state["life_cycle_state"],
+                "result_state": state.get("result_state", "UNKNOWN"),
+                "state_message": state.get("state_message", "")
+            }
+        else:
+            return {
+                "life_cycle_state": "UNKNOWN",
+                "result_state": "FAILED", 
+                "state_message": f"API Error: {response.text}"
+            }
+            
+    except Exception as e:
+        return {
+            "life_cycle_state": "ERROR",
+            "result_state": "FAILED",
+            "state_message": str(e)
+        }
+
+def run_pipeline(table_name, model_name, enable_tuning, test_size):
+    """Trigger the Databricks pipeline"""
+    try:
+        config = get_databricks_config()
+        if not config:
+            st.error("❌ Cannot start pipeline - Databricks configuration missing")
+            return
+        
+        # Show progress
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Map model names to internal codes
+        model_mapping = {
+            "Logistic Regression": "logistic",
+            "Random Forest": "random_forest", 
+            "Neural Network": "neural_net"
+        }
+        
+        model_code = model_mapping[model_name]
+        
+        # Step 1: Trigger job
+        status_text.info("🚀 Starting ML pipeline on Databricks...")
+        run_id = trigger_databricks_job(config, table_name, model_code, enable_tuning, test_size)
+        progress_bar.progress(30)
+        
+        if not run_id:
+            st.error("❌ Failed to start Databricks job.")
+            return
+        
+        # Store in session state
+        st.session_state.run_id = run_id
+        st.session_state.job_status = 'running'
+        
+        # Step 2: Poll for completion
+        status_text.info("🔄 Pipeline running... This may take a few minutes.")
+        
+        max_attempts = 120  # 10 minutes max
+        for attempt in range(max_attempts):
+            status_info = get_job_status(config, run_id)
+            life_cycle_state = status_info["life_cycle_state"]
+            
+            # Update progress based on state
+            if life_cycle_state == "PENDING":
+                progress = 0.3 + (attempt / max_attempts) * 0.2
+                status_text.info("⏳ Job queued...")
+            elif life_cycle_state == "RUNNING":
+                progress = 0.5 + (attempt / max_attempts) * 0.4
+                status_text.info("🤖 Processing data and training model...")
+            else:
+                progress = 0.9
+            
+            progress_bar.progress(min(progress, 0.9))
+            
+            if life_cycle_state in ["TERMINATED", "SKIPPED", "INTERNAL_ERROR"]:
+                break
+                
+            time.sleep(5)
+        
+        progress_bar.progress(1.0)
+        
+        if life_cycle_state == "TERMINATED" and status_info["result_state"] == "SUCCESS":
+            status_text.success("✅ Pipeline completed successfully!")
+            st.session_state.job_status = 'completed'
+            show_results_section(config, run_id)
+        else:
+            status_text.error(f"❌ Pipeline ended with status: {life_cycle_state}")
+            st.error(f"Error: {status_info['state_message']}")
+            st.session_state.job_status = 'failed'
+        
+    except Exception as e:
+        st.error(f"❌ Error in pipeline: {e}")
+        st.session_state.job_status = 'failed'
+
+def show_results_section(config, run_id):
+    """Display results from the completed job"""
+    try:
+        st.markdown("---")
+        st.header("📊 Pipeline Results")
+        
+        # Get job output
+        url = f"{config['host']}/api/2.0/jobs/runs/get-output?run_id={run_id}"
+        headers = {"Authorization": f"Bearer {config['token']}"}
+        
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            output = response.json()
+            if "notebook_output" in output and output["notebook_output"]:
+                st.subheader("Execution Logs")
+                logs = output["notebook_output"]["result"] if isinstance(output["notebook_output"], dict) else output["notebook_output"]
+                st.text_area("Logs", logs, height=200)
+            
+            # Try to get results from DBFS
+            try:
+                results_url = f"{config['host']}/api/2.0/dbfs/read"
+                headers = {"Authorization": f"Bearer {config['token']}"}
+                results_data = {"path": "/FileStore/results/results.json"}
+                
+                response = requests.get(results_url, headers=headers, json=results_data)
+                if response.status_code == 200:
+                    import base64
+                    results_content = base64.b64decode(response.json()["data"]).decode('utf-8')
+                    results = json.loads(results_content)
+                    
+                    if results.get("status") == "success":
+                        st.subheader("📈 Model Performance")
+                        metrics = results.get("metrics", {})
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Accuracy", f"{metrics.get('accuracy', 0):.4f}")
+                        with col2:
+                            st.metric("Precision", f"{metrics.get('precision', 0):.4f}")
+                        with col3:
+                            st.metric("Recall", f"{metrics.get('recall', 0):.4f}")
+                        with col4:
+                            st.metric("F1 Score", f"{metrics.get('f1_score', 0):.4f}")
+                        
+                        if "roc_auc" in metrics:
+                            st.metric("ROC AUC", f"{metrics.get('roc_auc', 0):.4f}")
+                        
+                        # Show dataset info
+                        st.subheader("📋 Dataset Info")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.info(f"**Table:** {results.get('data_source', 'N/A')}")
+                            st.info(f"**Model:** {results.get('model_type', 'N/A')}")
+                        with col2:
+                            if 'eda' in results:
+                                st.info(f"**Rows:** {results['eda'].get('shape', [0, 0])[0]:,}")
+                                st.info(f"**Features:** {results['eda'].get('shape', [0, 0])[1] - 1}")
+                        
+                        st.success("🎉 Model training completed successfully!")
+            except Exception as e:
+                st.info("📊 Check Databricks MLflow for detailed metrics")
+                
+        else:
+            st.info("📋 Check Databricks workspace for complete results")
+            
+    except Exception as e:
+        st.error(f"Error fetching results: {e}")
+
+def main():
+    initialize_session_state()
+    
+    st.title("🚀 Databricks ML Pipeline")
+    st.markdown("Train ML models on Diabetes Prediction Dataset!")
+    
+    # Check configurations
+    databricks_config = get_databricks_config()
+        
+    if not databricks_config:
+        st.error("❌ Databricks configuration missing.")
+        return
+    
+    # Sidebar for configuration
+    with st.sidebar:
+        st.header("⚙️ Configuration")
+        
+        # Model selection
+        model_options = [
+            "Logistic Regression",
+            "Random Forest", 
+            "Neural Network"
+        ]
+        
+        selected_model = st.selectbox("Select Model", options=model_options, index=1)
+        enable_tuning = st.checkbox("Enable Hyperparameter Tuning", value=False)
+        test_size = st.slider("Test Set Size (%)", 10, 40, 20)
+        
+        st.markdown("---")
+        st.header("📊 Current Setup")
+        st.success(f"✅ Using Table: **{st.session_state.table_name}**")
+        st.write(f"**Model:** {selected_model}")
+        st.write(f"**Test Size:** {test_size}%")
+        st.write(f"**Tuning:** {'Yes' if enable_tuning else 'No'}")
+        
+        st.markdown("---")
+        st.header("📈 Dataset Info")
+        st.info("""
+        **Diabetes Prediction Dataset:**
+        - **Target:** Diabetes_binary (0.0 = No, 1.0 = Yes)
+        - **Samples:** 253,681
+        - **Features:** 21 health indicators
+        - **Classes:** 0.0 (86%), 1.0 (14%)
+        """)
+        
+        st.markdown("---")
+        st.header("ℹ️ How It Works")
+        st.info("""
+        **Process:**
+        1. Configure ML settings
+        2. Start pipeline with diabetes dataset
+        3. Databricks trains model on health data
+        4. View prediction results
+        
+        **Features:**
+        - HighBP, HighChol, BMI, Smoker
+        - Stroke, HeartDisease, PhysActivity
+        - Fruits, Veggies, AlcoholConsump
+        """)
+    
+    # Main area
+    col1, col2 = st.columns([1, 1])
+    
+    with col1:
+        st.header("📋 Dataset Preview")
+        st.info(f"""
+        **Using Table:** `{st.session_state.table_name}`
+        
+        **Target Variable:** `Diabetes_binary`
+        - **0.0**: No Diabetes (218,334 samples)
+        - **1.0**: Has Diabetes (35,346 samples)
+        
+        **Health Indicators:**
+        - HighBP, HighChol, CholCheck, BMI
+        - Smoker, Stroke, HeartDiseaseorAttack
+        - PhysActivity, Fruits, Veggies, HvyAlcoholConsump
+        """)
+        
+        # Show table preview
+        if st.button("🔍 Preview Data", use_container_width=True):
+            try:
+                config = get_databricks_config()
+                if config:
+                    # Execute SQL to get table preview
+                    sql_url = f"{config['host']}/api/2.0/sql/statements"
+                    headers = {"Authorization": f"Bearer {config['token']}"}
+                    
+                    sql_data = {
+                        "statement": f"""
+                        SELECT Diabetes_binary, HighBP, HighChol, BMI, Smoker, 
+                               Stroke, HeartDiseaseorAttack, PhysActivity
+                        FROM hive_metastore.default.{st.session_state.table_name} 
+                        LIMIT 8
+                        """,
+                        "warehouse_id": "auto"
+                    }
+                    
+                    response = requests.post(sql_url, headers=headers, json=sql_data)
+                    if response.status_code == 200:
+                        result = response.json()
+                        if 'result' in result and 'data_array' in result['result']:
+                            data = result['result']['data_array']
+                            columns = [col['name'] for col in result['result']['manifest']['schema']['columns']]
+                            preview_df = pd.DataFrame(data, columns=columns)
+                            st.dataframe(preview_df)
+            except Exception as e:
+                st.error(f"Could not fetch preview: {e}")
+    
+    with col2:
+        st.header("🚀 Run ML Pipeline")
+        
+        st.write("**Pipeline Configuration:**")
+        st.write(f"- **Dataset:** Diabetes Prediction")
+        st.write(f"- **Samples:** 253,681 patients")
+        st.write(f"- **Target:** Diabetes Detection")
+        st.write(f"- **Model:** {selected_model}")
+        st.write(f"- **Test Size:** {test_size}%")
+        st.write(f"- **Tuning:** {'Yes' if enable_tuning else 'No'}")
+        
+        if st.button("🎯 Start Diabetes Prediction Pipeline", type="primary", use_container_width=True):
+            run_pipeline(st.session_state.table_name, selected_model, enable_tuning, test_size)
+        
+        # Show status
+        if st.session_state.job_status == 'running':
+            st.info("🔄 Pipeline is running...")
+            st.info("💡 Training model on diabetes dataset...")
+        elif st.session_state.job_status == 'completed':
+            st.success("✅ Pipeline completed!")
+        elif st.session_state.job_status == 'failed':
+            st.error("❌ Pipeline failed.")
+
+if __name__ == "__main__":
+    main()
